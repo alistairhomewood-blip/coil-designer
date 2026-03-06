@@ -100,8 +100,6 @@ function orient(pts, c) {
 
 function fullPath(c) { return orient(basePath(c),c); }
 
-/* ── Individual turn paths ────────────────────────────────── */
-
 function turnPaths(coil) {
   const {wd,tpl,layers}=calcPacking(coil);
   const paths=[];
@@ -155,8 +153,7 @@ function buildCoilMeshes(coil,color,sel,showIndiv){
   const wd=wireDiam(coil.wireGauge);
   const vr=wd/2;
   if(showIndiv&&coil.turns>1){
-    const tp=turnPaths(coil).slice(0,500);
-    tp.forEach(p=>meshes.push(tubeMesh(p,vr,color,sel)));
+    turnPaths(coil).slice(0,500).forEach(p=>meshes.push(tubeMesh(p,vr,color,sel)));
   } else {
     const path=fullPath(coil);
     const {layers,tpl}=calcPacking(coil);
@@ -167,8 +164,6 @@ function buildCoilMeshes(coil,color,sel,showIndiv){
   return meshes;
 }
 
-/* ── Ghost surfaces ───────────────────────────────────────── */
-
 function ghostTorus(R,r,center,normal){
   const g=new THREE.TorusGeometry(R,r,32,100);
   const m=new THREE.MeshStandardMaterial({color:0xffffff,transparent:true,opacity:.07,side:THREE.DoubleSide,depthWrite:false});
@@ -178,8 +173,7 @@ function ghostTorus(R,r,center,normal){
   const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n);
   const fq=new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI/2,0,0));
   mesh.quaternion.copy(q.multiply(fq));
-  mesh.position.set(...center);
-  return mesh;
+  mesh.position.set(...center);return mesh;
 }
 
 function ghostElongTorus(R,r,ext,center,normal){
@@ -190,61 +184,68 @@ function ghostElongTorus(R,r,ext,center,normal){
   const mesh=new THREE.Mesh(g,m);
   const n=new THREE.Vector3(...normal).normalize();
   if(n.length()<.001)n.set(0,1,0);
-  const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n);
-  mesh.quaternion.copy(q);
-  mesh.position.set(...center);
-  return mesh;
+  mesh.quaternion.copy(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n));
+  mesh.position.set(...center);return mesh;
 }
 
-/* ── Scale markers (3D meshes, not sprites — scale with zoom) */
+/* ── Axis scales: ruler-style ticks + minimal labels ──────── */
 
 function buildScales(maxCm) {
   const g = new THREE.Group();
-  const axes = [
-    {d:[1,0,0], c:"#ef4444", up:[0,0.008,0]},
-    {d:[0,1,0], c:"#22c55e", up:[0.008,0,0]},
-    {d:[0,0,1], c:"#3b82f6", up:[0,0.008,0]}
+  const axCfg = [
+    { dir:[1,0,0], c:0xef4444, perp1:[0,1,0], perp2:[0,0,1] },
+    { dir:[0,1,0], c:0x22c55e, perp1:[1,0,0], perp2:[0,0,1] },
+    { dir:[0,0,1], c:0x3b82f6, perp1:[0,1,0], perp2:[1,0,0] }
   ];
-  axes.forEach(({d,c,up}) => {
+  const tickLen5 = 0.004;
+  const tickLen10 = 0.007;
+  const labelNames = ["X","Y","Z"];
+
+  axCfg.forEach(({dir,c,perp1},ai) => {
+    const mat = new THREE.LineBasicMaterial({color:c, transparent:true, opacity:0.35});
+
+    // Main axis line
+    const axPts = [
+      new THREE.Vector3(-dir[0]*maxCm/100, -dir[1]*maxCm/100, -dir[2]*maxCm/100),
+      new THREE.Vector3(dir[0]*maxCm/100, dir[1]*maxCm/100, dir[2]*maxCm/100)
+    ];
+    g.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(axPts), mat.clone()));
+
     for (let cm = -maxCm; cm <= maxCm; cm += 5) {
       if (cm === 0) continue;
-      const pos = new THREE.Vector3(d[0]*cm/100, d[1]*cm/100, d[2]*cm/100);
+      const pos = new THREE.Vector3(dir[0]*cm/100, dir[1]*cm/100, dir[2]*cm/100);
+      const is10 = cm % 10 === 0;
+      const tl = is10 ? tickLen10 : tickLen5;
+      const p1 = new THREE.Vector3(perp1[0]*tl, perp1[1]*tl, perp1[2]*tl);
 
-      // Small tick sphere
-      const sg = new THREE.SphereGeometry(0.002, 4, 4);
-      const sm = new THREE.MeshBasicMaterial({color:new THREE.Color(c), transparent:true, opacity:0.4});
-      const tick = new THREE.Mesh(sg, sm);
-      tick.position.copy(pos);
-      g.add(tick);
+      // Tick
+      const tickMat = mat.clone();
+      tickMat.opacity = is10 ? 0.4 : 0.2;
+      g.add(new THREE.Line(
+        new THREE.BufferGeometry().setFromPoints([pos.clone().sub(p1), pos.clone().add(p1)]),
+        tickMat
+      ));
 
-      // Thin line from axis
-      const lineMat = new THREE.LineBasicMaterial({color:new THREE.Color(c), transparent:true, opacity:0.15});
-      const lineGeo = new THREE.BufferGeometry().setFromPoints([
-        pos.clone().sub(new THREE.Vector3(up[0]*0.5,up[1]*0.5,up[2]*0.5)),
-        pos.clone().add(new THREE.Vector3(up[0]*0.5,up[1]*0.5,up[2]*0.5))
-      ]);
-      g.add(new THREE.Line(lineGeo, lineMat));
-
-      // Label as small 3D plane (scales with distance, not fixed screen size)
-      const cv = document.createElement("canvas");
-      cv.width = 64; cv.height = 24;
-      const ctx = cv.getContext("2d");
-      ctx.fillStyle = c;
-      ctx.font = "bold 16px monospace";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(cm + "", 32, 12);
-      const tex = new THREE.CanvasTexture(cv);
-      tex.minFilter = THREE.LinearFilter;
-      const planeMat = new THREE.MeshBasicMaterial({map:tex, transparent:true, opacity:0.5, side:THREE.DoubleSide, depthTest:false});
-      const planeGeo = new THREE.PlaneGeometry(0.025, 0.01);
-      const label = new THREE.Mesh(planeGeo, planeMat);
-      label.position.copy(pos).add(new THREE.Vector3(up[0]*1.5, up[1]*1.5, up[2]*1.5));
-      // Face the label outward from the axis
-      if (d[0]) label.rotation.y = Math.PI / 2;
-      if (d[2]) { /* default facing is fine */ }
-      if (d[1]) label.rotation.x = -Math.PI / 2;
-      g.add(label);
+      // Label only every 10cm
+      if (is10) {
+        const cv = document.createElement("canvas");
+        cv.width = 48; cv.height = 20;
+        const ctx = cv.getContext("2d");
+        const hex = "#" + c.toString(16).padStart(6, "0");
+        ctx.fillStyle = hex;
+        ctx.font = "bold 14px monospace";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(cm + "", 24, 10);
+        const tex = new THREE.CanvasTexture(cv);
+        tex.minFilter = THREE.LinearFilter;
+        // Use sprite so it always faces camera, but very small
+        const spMat = new THREE.SpriteMaterial({map:tex, transparent:true, opacity:0.45, depthTest:false, sizeAttenuation:true});
+        const sp = new THREE.Sprite(spMat);
+        sp.position.copy(pos).add(new THREE.Vector3(perp1[0]*0.018, perp1[1]*0.018, perp1[2]*0.018));
+        sp.scale.set(0.03, 0.013, 1);
+        g.add(sp);
+      }
     }
   });
   return g;
@@ -254,12 +255,12 @@ function makeLabel(text, pos, color) {
   const cv = document.createElement("canvas"); cv.width=64; cv.height=64;
   const ctx = cv.getContext("2d"); ctx.fillStyle=color; ctx.font="bold 48px monospace";
   ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText(text,32,32);
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false}));
-  s.position.copy(pos); s.scale.set(.08,.08,.08); return s;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false,sizeAttenuation:true}));
+  s.position.copy(pos); s.scale.set(.06,.06,.06); return s;
 }
 
 /* ══════════════════════════════════════════════════════════════
-   PHYSICS — B-FIELD
+   PHYSICS
    ══════════════════════════════════════════════════════════════ */
 
 function coilCircumference(c) {
@@ -289,60 +290,52 @@ function getCoilParams(c) {
   const isTor = c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding";
   let R, cen, norm;
   if (isTor) {
-    const mr=c.majorRadius, rr=c.minorRadius, d=c.type==="elongated_toroidal_winding"?(c.extension||0):0;
+    const mr=c.majorRadius,rr=c.minorRadius,d=c.type==="elongated_toroidal_winding"?(c.extension||0):0;
     const {dr,dh}=stadiumPt(c.windingIndex/c.totalWindings,rr,d);
-    R=mr+dr;
-    cen=new THREE.Vector3(0,dh,0);
-    norm=new THREE.Vector3(0,1,0);
+    R=mr+dr; cen=new THREE.Vector3(0,dh,0); norm=new THREE.Vector3(0,1,0);
     const n2=new THREE.Vector3(...c.normal).normalize();
     const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n2);
     cen.applyQuaternion(q).add(new THREE.Vector3(...c.center));
     norm.applyQuaternion(q);
-  } else if (c.type==="circular") {
-    R=c.radius; cen=new THREE.Vector3(...c.center); norm=new THREE.Vector3(...c.normal).normalize();
-  } else if (c.type==="racetrack") {
+  } else if(c.type==="circular"){
+    R=c.radius;cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
+  } else if(c.type==="racetrack"){
     R=Math.sqrt((c.straightLength*2*c.arcRadius+Math.PI*c.arcRadius**2)/Math.PI);
-    cen=new THREE.Vector3(...c.center); norm=new THREE.Vector3(...c.normal).normalize();
-  } else if (c.type==="elliptical") {
+    cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
+  } else if(c.type==="elliptical"){
     R=Math.sqrt(c.semiMajor*c.semiMinor);
-    cen=new THREE.Vector3(...c.center); norm=new THREE.Vector3(...c.normal).normalize();
-  } else {
-    return null;
-  }
-  return { R, cen, norm, NI: c.turns * c.current };
+    cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
+  } else return null;
+  return { R, cen, norm, NI: c.turns*c.current };
 }
 
 function estimateB(coils, pt) {
-  let Bx=0, By=0, Bz=0;
-  coils.forEach(c => {
-    const p = getCoilParams(c);
-    if (!p) return;
-    const {R, cen, norm, NI} = p;
-    const rv = pt.clone().sub(cen);
-    const dist = rv.length();
-    if (dist < 1e-10) {
-      const Bm = MU0*NI/(2*R);
-      Bx+=Bm*norm.x; By+=Bm*norm.y; Bz+=Bm*norm.z; return;
-    }
-    const z = rv.dot(norm);
-    const rPerp = rv.clone().sub(norm.clone().multiplyScalar(z));
-    const rho = rPerp.length();
-    if (rho < 0.01*R) {
-      const Bm = MU0*NI*R*R/(2*Math.pow(R*R+z*z,1.5));
-      Bx+=Bm*norm.x; By+=Bm*norm.y; Bz+=Bm*norm.z;
+  let Bx=0,By=0,Bz=0;
+  coils.forEach(c=>{
+    const p=getCoilParams(c);if(!p)return;
+    const{R,cen,norm,NI}=p;
+    const rv=pt.clone().sub(cen);
+    const dist=rv.length();
+    if(dist<1e-10){const Bm=MU0*NI/(2*R);Bx+=Bm*norm.x;By+=Bm*norm.y;Bz+=Bm*norm.z;return;}
+    const z=rv.dot(norm);
+    const rPerp=rv.clone().sub(norm.clone().multiplyScalar(z));
+    const rho=rPerp.length();
+    if(rho<0.01*R){
+      const Bm=MU0*NI*R*R/(2*Math.pow(R*R+z*z,1.5));
+      Bx+=Bm*norm.x;By+=Bm*norm.y;Bz+=Bm*norm.z;
     } else {
-      const m = NI*Math.PI*R*R;
-      const mV = norm.clone().multiplyScalar(m);
-      const rH = rv.clone().normalize();
-      const md = mV.dot(rH);
-      const co = MU0/(4*Math.PI*dist**3);
-      Bx+=co*(3*md*rH.x-mV.x); By+=co*(3*md*rH.y-mV.y); Bz+=co*(3*md*rH.z-mV.z);
+      const m=NI*Math.PI*R*R;
+      const mV=norm.clone().multiplyScalar(m);
+      const rH=rv.clone().normalize();
+      const md=mV.dot(rH);
+      const co=MU0/(4*Math.PI*dist**3);
+      Bx+=co*(3*md*rH.x-mV.x);By+=co*(3*md*rH.y-mV.y);Bz+=co*(3*md*rH.z-mV.z);
     }
   });
-  return new THREE.Vector3(Bx, By, Bz);
+  return new THREE.Vector3(Bx,By,Bz);
 }
 
-function fmtB(v) {
+function fmtB(v){
   if(v<1e-9) return (v*1e12).toFixed(2)+" pT";
   if(v<1e-6) return (v*1e9).toFixed(2)+" nT";
   if(v<1e-3) return (v*1e6).toFixed(2)+" µT";
@@ -351,29 +344,36 @@ function fmtB(v) {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   FIELD LINES
+   FIELD LINES — colored by |B| strength, tube geometry
    ══════════════════════════════════════════════════════════════ */
 
+function strengthToColor(t) {
+  // t in [0,1]: 0=weak(blue), 0.25=cyan, 0.5=green, 0.75=yellow, 1=red
+  if (t < 0.25) { const s=t/0.25; return new THREE.Color(0, s, 1); }
+  if (t < 0.5)  { const s=(t-0.25)/0.25; return new THREE.Color(0, 1, 1-s); }
+  if (t < 0.75) { const s=(t-0.5)/0.25; return new THREE.Color(s, 1, 0); }
+  const s=(t-0.75)/0.25; return new THREE.Color(1, 1-s, 0);
+}
+
 function traceFieldLine(coils, start, steps, ds) {
-  const pts = [start.clone()];
+  const pts = []; const mags = [];
   const p = start.clone();
   for (let i = 0; i < steps; i++) {
     const B = estimateB(coils, p);
     const mag = B.length();
+    pts.push(p.clone());
+    mags.push(mag);
     if (mag < 1e-15) break;
     B.normalize().multiplyScalar(ds);
     p.add(B);
-    if (p.length() > 2) break; // stop if too far from origin
-    pts.push(p.clone());
+    if (p.length() > 2) break;
   }
-  return pts;
+  return { pts, mags };
 }
 
 function generateFieldLines(coils, density) {
   const lines = [];
   if (coils.length === 0) return lines;
-
-  // Seed points: rings around origin in XZ plane at various heights
   const seedDists = [0.02, 0.05, 0.1, 0.15, 0.25];
   const heights = [-0.15, -0.08, 0, 0.08, 0.15];
   const nAround = Math.max(4, density);
@@ -383,14 +383,12 @@ function generateFieldLines(coils, density) {
   heights.forEach(y => {
     seedDists.forEach(r => {
       for (let i = 0; i < nAround; i++) {
-        const theta = (i / nAround) * 2 * Math.PI;
-        const seed = new THREE.Vector3(r * Math.cos(theta), y, r * Math.sin(theta));
-        // Trace forward
+        const theta = (i/nAround)*2*Math.PI;
+        const seed = new THREE.Vector3(r*Math.cos(theta), y, r*Math.sin(theta));
         const fwd = traceFieldLine(coils, seed, steps, ds);
-        if (fwd.length > 3) lines.push(fwd);
-        // Trace backward
+        if (fwd.pts.length > 5) lines.push(fwd);
         const bwd = traceFieldLine(coils, seed, steps, -ds);
-        if (bwd.length > 3) lines.push(bwd);
+        if (bwd.pts.length > 5) lines.push(bwd);
       }
     });
   });
@@ -399,24 +397,55 @@ function generateFieldLines(coils, density) {
 
 function buildFieldLineMeshes(fieldLines) {
   const group = new THREE.Group();
-  // Color map: blue (weak) -> cyan -> green -> yellow -> red (strong)
-  fieldLines.forEach(pts => {
-    const positions = [];
-    const colors = [];
-    pts.forEach((p, i) => {
-      positions.push(p.x, p.y, p.z);
-      // Color by position along line (proxy for field evolution)
-      const t = i / pts.length;
-      const r = t < 0.5 ? t * 2 : 1;
-      const gv = t < 0.5 ? 1 : 2 - t * 2;
-      const b = t < 0.5 ? 1 - t * 2 : 0;
-      colors.push(r * 0.8, gv * 0.8, b * 0.8);
+  if (fieldLines.length === 0) return group;
+
+  // Find global min/max |B| for color normalization
+  let globalMin = Infinity, globalMax = -Infinity;
+  fieldLines.forEach(({mags}) => {
+    mags.forEach(m => { if(m>1e-15){if(m<globalMin)globalMin=m;if(m>globalMax)globalMax=m;} });
+  });
+  if (globalMin >= globalMax) { globalMin = 0; globalMax = 1; }
+  // Use log scale for better contrast
+  const logMin = Math.log10(Math.max(globalMin, 1e-15));
+  const logMax = Math.log10(Math.max(globalMax, 1e-14));
+  const logRange = logMax - logMin || 1;
+
+  const tubeRadius = 0.0015;
+
+  fieldLines.forEach(({pts, mags}) => {
+    if (pts.length < 3) return;
+
+    // Build curve
+    const curve = new THREE.CatmullRomCurve3(pts, false);
+    const tubSegs = Math.min(pts.length * 2, 200);
+    const geom = new THREE.TubeGeometry(curve, tubSegs, tubeRadius, 5, false);
+
+    // Color each vertex by field strength at nearest point
+    const posAttr = geom.getAttribute("position");
+    const colorArr = new Float32Array(posAttr.count * 3);
+    for (let vi = 0; vi < posAttr.count; vi++) {
+      const vx = posAttr.getX(vi), vy = posAttr.getY(vi), vz = posAttr.getZ(vi);
+      // Find nearest original point
+      let bestIdx = 0, bestDist = Infinity;
+      for (let pi = 0; pi < pts.length; pi++) {
+        const dx = vx-pts[pi].x, dy = vy-pts[pi].y, dz = vz-pts[pi].z;
+        const d2 = dx*dx+dy*dy+dz*dz;
+        if (d2 < bestDist) { bestDist=d2; bestIdx=pi; }
+      }
+      const mag = mags[bestIdx] || 0;
+      const logMag = Math.log10(Math.max(mag, 1e-15));
+      const t = Math.max(0, Math.min(1, (logMag - logMin) / logRange));
+      const col = strengthToColor(t);
+      colorArr[vi*3] = col.r; colorArr[vi*3+1] = col.g; colorArr[vi*3+2] = col.b;
+    }
+    geom.setAttribute("color", new THREE.Float32BufferAttribute(colorArr, 3));
+
+    const mat = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.7,
     });
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
-    geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
-    const mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5, linewidth: 1 });
-    group.add(new THREE.Line(geo, mat));
+    group.add(new THREE.Mesh(geom, mat));
   });
   return group;
 }
@@ -435,7 +464,7 @@ COIL TYPES:
 3. "elliptical" — planar elliptical loop.
 4. "toroidal_winding" — wire on torus surface, toroidal direction, fixed poloidal angle. N windings = N coils with windingIndex 0..N-1.
    majorRadius=(innerRadius+outerRadius)/2, minorRadius=(outerRadius-innerRadius)/2.
-5. "elongated_toroidal_winding" — same but cross-section is stadium (semicircles + straight walls). extension = straight wall length.
+5. "elongated_toroidal_winding" — same but cross-section is stadium. extension = straight wall length.
 
 Each coil MUST have ALL fields:
 {"type":"...","name":"...","center":[x,y,z],"normal":[nx,ny,nz],"radius":0.5,"semiMajor":0.5,"semiMinor":0.3,"straightLength":0.6,"arcRadius":0.3,"majorRadius":0.1,"minorRadius":0.05,"extension":0.0,"windingIndex":0,"totalWindings":12,"turns":100,"current":10.0,"wireGauge":14,"channelWidth":0.01}
@@ -530,8 +559,6 @@ function CoilCard({coil,index,selected,multiSelected,onSelect,onShiftSelect,onUp
   );
 }
 
-/* ── Universal settings ───────────────────────────────────── */
-
 function UniversalPanel({onApply}){
   const[vals,setVals]=useState({turns:100,current:10,wireGauge:14,channelWidth:0.01});
   const[fields,setFields]=useState({turns:true,current:true,wireGauge:true,channelWidth:true});
@@ -548,46 +575,37 @@ function UniversalPanel({onApply}){
           </div>
         ))}
         <button onClick={()=>onApply(vals,fields)}
-          className="mt-1 px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded self-start">
-          Apply
-        </button>
+          className="mt-1 px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded self-start">Apply</button>
       </div>
     </div>
   );
 }
-
-/* ── Info box ─────────────────────────────────────────────── */
 
 function InfoBox({coils,show,setShow}){
   if(!show||coils.length===0) return(
     <button onClick={()=>setShow(true)} className="absolute bottom-3 right-3 px-2 py-1 bg-gray-800/80 text-gray-400 text-xs rounded hover:bg-gray-700 z-10">Stats</button>
   );
   const stats=calcStats(coils);
-  const bOrigin=estimateB(coils,new THREE.Vector3(0,0,0));
+  const bO=estimateB(coils,new THREE.Vector3(0,0,0));
   const b30=estimateB(coils,new THREE.Vector3(0.3,0,0));
-  const bOmag=bOrigin.length(), b3mag=b30.length();
   return(
     <div className="absolute bottom-3 right-3 bg-gray-900/95 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 z-10 min-w-56 max-w-72">
       <div className="flex justify-between items-center mb-2">
-        <span className="font-medium text-gray-200">Configuration Stats</span>
+        <span className="font-medium text-gray-200">Stats</span>
         <button onClick={()=>setShow(false)} className="text-gray-500 hover:text-gray-300">✕</button>
       </div>
       <div className="flex flex-col gap-1">
-        <div>Total wire: <span className="text-gray-100">{stats.totalLen<1?(stats.totalLen*100).toFixed(1)+" cm":stats.totalLen.toFixed(2)+" m"}</span></div>
-        <div>Copper mass: <span className="text-gray-100">{stats.totalMass<1?(stats.totalMass*1000).toFixed(1)+" g":stats.totalMass.toFixed(3)+" kg"}</span></div>
-        <div>Power (I²R): <span className="text-gray-100">{stats.totalPower<1?(stats.totalPower*1000).toFixed(2)+" mW":stats.totalPower.toFixed(3)+" W"}</span></div>
+        <div>Wire: <span className="text-gray-100">{stats.totalLen<1?(stats.totalLen*100).toFixed(1)+" cm":stats.totalLen.toFixed(2)+" m"}</span></div>
+        <div>Cu mass: <span className="text-gray-100">{stats.totalMass<1?(stats.totalMass*1000).toFixed(1)+" g":stats.totalMass.toFixed(3)+" kg"}</span></div>
+        <div>Power: <span className="text-gray-100">{stats.totalPower<1?(stats.totalPower*1000).toFixed(2)+" mW":stats.totalPower.toFixed(3)+" W"}</span></div>
         <div className="border-t border-gray-800 pt-1 mt-1"/>
-        <div>|B| at origin: <span className="text-yellow-300">{fmtB(bOmag)}</span></div>
-        <div className="text-gray-500 ml-2">({fmtB(Math.abs(bOrigin.x))}, {fmtB(Math.abs(bOrigin.y))}, {fmtB(Math.abs(bOrigin.z))})</div>
-        <div>|B| at 30cm: <span className="text-yellow-300">{fmtB(b3mag)}</span></div>
-        <div className="text-gray-500 ml-2">({fmtB(Math.abs(b30.x))}, {fmtB(Math.abs(b30.y))}, {fmtB(Math.abs(b30.z))})</div>
+        <div>|B| origin: <span className="text-yellow-300">{fmtB(bO.length())}</span></div>
+        <div>|B| 30cm: <span className="text-yellow-300">{fmtB(b30.length())}</span></div>
         <div className="text-gray-600 mt-1 italic">Dipole/on-axis approx.</div>
       </div>
     </div>
   );
 }
-
-/* ── Save/Load ────────────────────────────────────────────── */
 
 function SaveLoadPanel({coils,onLoad}){
   const[name,setName]=useState("");
@@ -611,16 +629,14 @@ function SaveLoadPanel({coils,onLoad}){
               className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-gray-200 text-xs outline-none"/>
             <button onClick={save} className="px-2 py-0.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">Save</button>
           </div>
-          {keys.length>0&&(
-            <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
-              {keys.map(k=>(
-                <div key={k} className="flex items-center justify-between bg-gray-800/50 rounded px-2 py-0.5">
-                  <button onClick={()=>load(k)} className="text-xs text-gray-300 hover:text-white">{k}</button>
-                  <button onClick={()=>del(k)} className="text-red-500 hover:text-red-400 text-xs">✕</button>
-                </div>
-              ))}
-            </div>
-          )}
+          {keys.length>0&&<div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
+            {keys.map(k=>(
+              <div key={k} className="flex items-center justify-between bg-gray-800/50 rounded px-2 py-0.5">
+                <button onClick={()=>load(k)} className="text-xs text-gray-300 hover:text-white">{k}</button>
+                <button onClick={()=>del(k)} className="text-red-500 hover:text-red-400 text-xs">✕</button>
+              </div>
+            ))}
+          </div>}
         </div>
       )}
     </div>
@@ -643,8 +659,8 @@ export default function App(){
   const[showStats,setShowStats]=useState(true);
   const[showField,setShowField]=useState(false);
   const[fieldDensity,setFieldDensity]=useState(6);
+  const[fieldLoading,setFieldLoading]=useState(false);
 
-  // Undo/redo
   const histRef=useRef([[]]);
   const histIdx=useRef(0);
   const skipHist=useRef(false);
@@ -661,13 +677,9 @@ export default function App(){
   useEffect(()=>{
     const handler=(e)=>{
       if((e.metaKey||e.ctrlKey)&&e.key==="z"){
-        e.preventDefault();
-        skipHist.current=true;
-        if(e.shiftKey){
-          if(histIdx.current<histRef.current.length-1){histIdx.current++;setCoils(JSON.parse(JSON.stringify(histRef.current[histIdx.current])));}
-        } else {
-          if(histIdx.current>0){histIdx.current--;setCoils(JSON.parse(JSON.stringify(histRef.current[histIdx.current])));}
-        }
+        e.preventDefault();skipHist.current=true;
+        if(e.shiftKey){if(histIdx.current<histRef.current.length-1){histIdx.current++;setCoils(JSON.parse(JSON.stringify(histRef.current[histIdx.current])));}}
+        else{if(histIdx.current>0){histIdx.current--;setCoils(JSON.parse(JSON.stringify(histRef.current[histIdx.current])));}}
         setTimeout(()=>{skipHist.current=false;},0);
       }
     };
@@ -685,7 +697,6 @@ export default function App(){
   const frameRef=useRef(null);
   const orbitRef=useRef({theta:Math.PI/4,phi:Math.PI/3,dist:1.5,target:new THREE.Vector3(),dragging:false,panning:false,lastX:0,lastY:0});
 
-  /* ── Init Three.js ───────────────────────────────────── */
   useEffect(()=>{
     const el=containerRef.current;if(!el)return;
     const scene=new THREE.Scene();scene.background=new THREE.Color("#0d1117");sceneRef.current=scene;
@@ -697,7 +708,7 @@ export default function App(){
     scene.add(new THREE.AmbientLight(0xffffff,.5));
     const d=new THREE.DirectionalLight(0xffffff,.8);d.position.set(3,5,4);scene.add(d);
     scene.add(new THREE.HemisphereLight(0x4488ff,0x222244,.3));
-    scene.add(new THREE.GridHelper(2,40,0x333333,0x1a1a2e));
+    scene.add(new THREE.GridHelper(2,40,0x222222,0x161625));
     scene.add(new THREE.AxesHelper(.5));
     scene.add(makeLabel("X",new THREE.Vector3(.55,0,0),"#ef4444"));
     scene.add(makeLabel("Y",new THREE.Vector3(0,.55,0),"#22c55e"));
@@ -719,7 +730,6 @@ export default function App(){
     return()=>{cancelAnimationFrame(frameRef.current);window.removeEventListener("resize",onResize);renderer.dispose();if(el.contains(renderer.domElement))el.removeChild(renderer.domElement);};
   },[]);
 
-  /* ── Orbit controls ──────────────────────────────────── */
   useEffect(()=>{
     const el=containerRef.current;if(!el)return;
     function updateCam(){
@@ -735,27 +745,20 @@ export default function App(){
     const onMove=e=>{
       const o=orbitRef.current;
       const dx=e.clientX-o.lastX,dy=e.clientY-o.lastY;
-      if(o.dragging){
-        o.theta-=dx*.005;o.phi=Math.max(.1,Math.min(Math.PI-.1,o.phi-dy*.005));
-      }else if(o.panning){
+      if(o.dragging){o.theta-=dx*.005;o.phi=Math.max(.1,Math.min(Math.PI-.1,o.phi-dy*.005));}
+      else if(o.panning){
         const cam=cameraRef.current;if(!cam)return;
         const fwd=new THREE.Vector3();cam.getWorldDirection(fwd);
         const right=new THREE.Vector3().crossVectors(fwd,cam.up).normalize();
         const up=new THREE.Vector3().crossVectors(right,fwd).normalize();
         const ps=o.dist*.001;
-        o.target.add(right.multiplyScalar(-dx*ps));
-        o.target.add(up.multiplyScalar(dy*ps));
+        o.target.add(right.multiplyScalar(-dx*ps)).add(up.multiplyScalar(dy*ps));
       }
       o.lastX=e.clientX;o.lastY=e.clientY;
       if(o.dragging||o.panning)updateCam();
     };
     const onUp=()=>{orbitRef.current.dragging=false;orbitRef.current.panning=false;};
-    const onWheel=e=>{
-      e.preventDefault();
-      const factor=e.deltaY>0?1.08:1/1.08;
-      orbitRef.current.dist=Math.max(.01,Math.min(50,orbitRef.current.dist*factor));
-      updateCam();
-    };
+    const onWheel=e=>{e.preventDefault();orbitRef.current.dist=Math.max(.01,Math.min(50,orbitRef.current.dist*(e.deltaY>0?1.08:1/1.08)));updateCam();};
     const onCtx=e=>e.preventDefault();
     el.addEventListener("mousedown",onDown);window.addEventListener("mousemove",onMove);
     window.addEventListener("mouseup",onUp);el.addEventListener("wheel",onWheel,{passive:false});
@@ -763,10 +766,8 @@ export default function App(){
     return()=>{el.removeEventListener("mousedown",onDown);window.removeEventListener("mousemove",onMove);window.removeEventListener("mouseup",onUp);el.removeEventListener("wheel",onWheel);el.removeEventListener("contextmenu",onCtx);};
   },[]);
 
-  /* ── Scale visibility ────────────────────────────────── */
   useEffect(()=>{if(scaleGroupRef.current)scaleGroupRef.current.visible=showScales;},[showScales]);
 
-  /* ── Update coil meshes ──────────────────────────────── */
   useEffect(()=>{
     const cg=coilGroupRef.current;if(!cg)return;
     while(cg.children.length){const c=cg.children[0];if(c.geometry)c.geometry.dispose();if(c.material)c.material.dispose();cg.remove(c);}
@@ -789,41 +790,37 @@ export default function App(){
     });
   },[coils,selectedId,multiSel,showIndiv]);
 
-  /* ── Field lines ─────────────────────────────────────── */
   useEffect(()=>{
     const fg=fieldGroupRef.current;if(!fg)return;
     while(fg.children.length){const c=fg.children[0];if(c.geometry)c.geometry.dispose();if(c.material)c.material.dispose();fg.remove(c);}
     if(showField&&coils.length>0){
-      const lines=generateFieldLines(coils,fieldDensity);
-      const meshGroup=buildFieldLineMeshes(lines);
-      meshGroup.children.forEach(c=>fg.add(c));
-    }
-    fg.visible=showField;
+      setFieldLoading(true);
+      setTimeout(()=>{
+        const lines=generateFieldLines(coils,fieldDensity);
+        const meshGroup=buildFieldLineMeshes(lines);
+        meshGroup.children.forEach(c=>fg.add(c));
+        fg.visible=true;
+        setFieldLoading(false);
+      },50);
+    } else { fg.visible=false; setFieldLoading(false); }
   },[showField,coils,fieldDensity]);
 
-  /* ── Fit view ────────────────────────────────────────── */
   const fitView=useCallback(()=>{
     if(coils.length===0)return;
     const box=new THREE.Box3();
     coils.forEach(c=>{fullPath(c).forEach(p=>box.expandByPoint(p));});
     const center=new THREE.Vector3();box.getCenter(center);
     const size=box.getSize(new THREE.Vector3()).length();
-    const o=orbitRef.current;
-    o.target.copy(center);o.dist=Math.max(size*1.2,.1);
+    const o=orbitRef.current;o.target.copy(center);o.dist=Math.max(size*1.2,.1);
     const cam=cameraRef.current;if(!cam)return;
     cam.position.set(o.target.x+o.dist*Math.sin(o.phi)*Math.cos(o.theta),o.target.y+o.dist*Math.cos(o.phi),o.target.z+o.dist*Math.sin(o.phi)*Math.sin(o.theta));
     cam.lookAt(o.target);
   },[coils]);
 
-  /* ── Handlers ────────────────────────────────────────── */
   const addCoil=()=>{const c=defaultCoil();pushCoils([...coils,c]);setSelectedId(c.id);};
   const updateCoil=u=>pushCoils(coils.map(c=>c.id===u.id?u:c));
   const deleteCoil=id=>{pushCoils(coils.filter(c=>c.id!==id));if(selectedId===id)setSelectedId(null);setMultiSel(s=>{const n=new Set(s);n.delete(id);return n;});};
-  const duplicateCoil=id=>{
-    const src=coils.find(c=>c.id===id);if(!src)return;
-    const dup=defaultCoil({...src,name:src.name+" copy"});
-    pushCoils([...coils,dup]);setSelectedId(dup.id);
-  };
+  const duplicateCoil=id=>{const src=coils.find(c=>c.id===id);if(!src)return;const dup=defaultCoil({...src,name:src.name+" copy"});pushCoils([...coils,dup]);setSelectedId(dup.id);};
   const shiftSelect=id=>{setMultiSel(s=>{const n=new Set(s);if(n.has(id))n.delete(id);else n.add(id);return n;});};
 
   const applyUniversal=(vals,fields)=>{
@@ -832,17 +829,14 @@ export default function App(){
     pushCoils(coils.map(c=>{
       if(!ids.has(c.id))return c;
       const u={...c};
-      if(fields.turns)u.turns=vals.turns;
-      if(fields.current)u.current=vals.current;
-      if(fields.wireGauge)u.wireGauge=vals.wireGauge;
-      if(fields.channelWidth)u.channelWidth=vals.channelWidth;
+      if(fields.turns)u.turns=vals.turns;if(fields.current)u.current=vals.current;
+      if(fields.wireGauge)u.wireGauge=vals.wireGauge;if(fields.channelWidth)u.channelWidth=vals.channelWidth;
       return u;
     }));
   };
 
   const handleParse=async()=>{
-    if(!prompt.trim())return;
-    setLoading(true);setError(null);
+    if(!prompt.trim())return;setLoading(true);setError(null);
     try{
       const parsed=await parseWithClaude(prompt);
       if(!Array.isArray(parsed))throw new Error("Expected JSON array");
@@ -892,7 +886,6 @@ export default function App(){
               onDelete={deleteCoil} onDuplicate={duplicateCoil}/>)}
           </div>
 
-          {/* Display toggles */}
           <div className="border-t border-gray-800 px-3 py-2 bg-gray-900/30 flex flex-col gap-1">
             <span className="text-xs text-gray-400 font-medium">Display</span>
             <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
@@ -905,7 +898,7 @@ export default function App(){
             </label>
             <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
               <input type="checkbox" checked={showField} onChange={e=>setShowField(e.target.checked)} className="rounded border-gray-600"/>
-              Field lines
+              Field lines {fieldLoading&&<span className="text-yellow-500">(computing...)</span>}
             </label>
             {showField&&(
               <label className="flex flex-col gap-0.5 text-xs text-gray-500 ml-5">

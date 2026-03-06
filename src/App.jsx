@@ -1,678 +1,810 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import * as THREE from "three";
 
-/* ── Constants ────────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   CONSTANTS
+   ══════════════════════════════════════════════════════════════ */
 
 const COLORS = [
   "#3b82f6","#ef4444","#22c55e","#f59e0b","#8b5cf6",
   "#ec4899","#06b6d4","#f97316","#a3e635","#fb923c"
 ];
 
-const AWG_DIAMETER_M = {
-  4:0.005189, 6:0.004115, 8:0.003264, 10:0.002588, 12:0.002053,
-  14:0.001628, 16:0.001291, 18:0.001024, 20:0.000812, 22:0.000644,
-  24:0.000511, 26:0.000405, 28:0.000321, 30:0.000255, 32:0.000202,
+const AWG_DIAM = {
+  4:5.189,6:4.115,8:3.264,10:2.588,12:2.053,14:1.628,16:1.291,
+  18:1.024,20:0.812,22:0.644,24:0.511,26:0.405,28:0.321,30:0.255,32:0.202
 };
+function wireDiam(awg) { return (AWG_DIAM[awg] || 1.628) / 1000; }
 
-function getWireDiam(awg) { return AWG_DIAMETER_M[awg] || 0.001628; }
+const MU0 = 4 * Math.PI * 1e-7;
+const CU_RHO = 1.68e-8;
+const CU_DENSITY = 8960;
 
-let _nextId = 1;
-function makeId() { return _nextId++; }
+let _id = 1;
+function mkId() { return _id++; }
 
-function defaultCoil(overrides = {}) {
-  const id = overrides.id || makeId();
+function defaultCoil(o = {}) {
+  const id = o.id || mkId();
   return {
-    id, type: "circular", name: `Coil ${id}`,
-    center: [0,0,0], normal: [0,1,0],
-    radius: 0.5, semiMajor: 0.5, semiMinor: 0.3,
-    straightLength: 0.6, arcRadius: 0.3,
-    majorRadius: 0.1, minorRadius: 0.05,
-    extension: 0.0,
-    windingIndex: 0, totalWindings: 12,
-    turns: 100, current: 10, wireGauge: 14, windingLayers: 1,
-    channelWidth: 0.01,
-    ...overrides, id,
+    id, type:"circular", name:`Coil ${id}`,
+    center:[0,0,0], normal:[0,1,0],
+    radius:0.5, semiMajor:0.5, semiMinor:0.3,
+    straightLength:0.6, arcRadius:0.3,
+    majorRadius:0.1, minorRadius:0.05, extension:0,
+    windingIndex:0, totalWindings:12,
+    turns:100, current:10, wireGauge:14, channelWidth:0.01,
+    ...o, id
   };
 }
 
-/* ── Packing calculation ──────────────────────────────────── */
-
-function calcPacking(coil) {
-  const wd = getWireDiam(coil.wireGauge);
-  const cw = coil.channelWidth || 0.01;
-  const turnsPerLayer = Math.max(1, Math.floor(cw / wd));
-  const numLayers = Math.ceil(coil.turns / turnsPerLayer);
-  const actualLastLayerTurns = coil.turns - (numLayers - 1) * turnsPerLayer;
-  return { wd, cw, turnsPerLayer, numLayers, actualLastLayerTurns };
+function calcPacking(c) {
+  const wd = wireDiam(c.wireGauge);
+  const cw = c.channelWidth || 0.01;
+  const tpl = Math.max(1, Math.floor(cw / wd));
+  const layers = Math.ceil(c.turns / tpl);
+  return { wd, cw, tpl, layers };
 }
 
-/* ── Stadium perimeter utilities (for elongated toroid) ──── */
+/* ══════════════════════════════════════════════════════════════
+   STADIUM GEOMETRY (for elongated toroid cross-section)
+   ══════════════════════════════════════════════════════════════ */
 
-function stadiumPerimeter(r, d) { return 2 * Math.PI * r + 2 * d; }
+function stadiumPerim(r, d) { return 2*Math.PI*r + 2*d; }
 
-function stadiumPoint(t, r, d) {
+function stadiumPt(t, r, d) {
   if (d <= 0) {
-    const angle = t * 2 * Math.PI;
-    return { dr: r*Math.cos(angle), dh: r*Math.sin(angle), nr: Math.cos(angle), nh: Math.sin(angle) };
+    const a = t*2*Math.PI;
+    return { dr:r*Math.cos(a), dh:r*Math.sin(a), nr:Math.cos(a), nh:Math.sin(a) };
   }
-  const L = stadiumPerimeter(r, d);
-  let s = ((t % 1) + 1) % 1 * L;
-  const s1 = Math.PI * r;
-  const s2 = s1 + d;
-  const s3 = s2 + Math.PI * r;
-  if (s < s1) {
-    const a = s / r;
-    return { dr: r*Math.cos(a), dh: d/2 + r*Math.sin(a), nr: Math.cos(a), nh: Math.sin(a) };
-  } else if (s < s2) {
-    return { dr: -r, dh: d/2 - (s - s1), nr: -1, nh: 0 };
-  } else if (s < s3) {
-    const a = Math.PI + (s - s2) / r;
-    return { dr: r*Math.cos(a), dh: -d/2 + r*Math.sin(a), nr: Math.cos(a), nh: Math.sin(a) };
-  } else {
-    return { dr: r, dh: -d/2 + (s - s3), nr: 1, nh: 0 };
-  }
+  const L = stadiumPerim(r, d);
+  let s = (((t%1)+1)%1) * L;
+  const s1=Math.PI*r, s2=s1+d, s3=s2+Math.PI*r;
+  if (s < s1) { const a=s/r; return {dr:r*Math.cos(a),dh:d/2+r*Math.sin(a),nr:Math.cos(a),nh:Math.sin(a)}; }
+  if (s < s2) { return {dr:-r,dh:d/2-(s-s1),nr:-1,nh:0}; }
+  if (s < s3) { const a=Math.PI+(s-s2)/r; return {dr:r*Math.cos(a),dh:-d/2+r*Math.sin(a),nr:Math.cos(a),nh:Math.sin(a)}; }
+  return {dr:r,dh:-d/2+(s-s3),nr:1,nh:0};
 }
 
-/* ── Path generation ──────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   PATH GENERATION
+   ══════════════════════════════════════════════════════════════ */
 
-function generateBasePath(coil) {
-  const pts = [], N = 200;
-  if (coil.type === "circular") {
-    for (let i = 0; i < N; i++) {
-      const t = (i/N)*2*Math.PI;
-      pts.push(new THREE.Vector3(coil.radius*Math.cos(t), 0, coil.radius*Math.sin(t)));
-    }
-  } else if (coil.type === "racetrack") {
-    const L = coil.straightLength/2, R = coil.arcRadius, seg = Math.floor(N/4);
-    for (let i=0;i<seg;i++) pts.push(new THREE.Vector3(-L+(i/seg)*2*L,0,-R));
-    for (let i=0;i<seg;i++){const a=(i/seg)*Math.PI;pts.push(new THREE.Vector3(L+R*Math.sin(a),0,-R*Math.cos(a)));}
-    for (let i=0;i<seg;i++) pts.push(new THREE.Vector3(L-(i/seg)*2*L,0,R));
-    for (let i=0;i<seg;i++){const a=(i/seg)*Math.PI;pts.push(new THREE.Vector3(-L-R*Math.sin(a),0,R*Math.cos(a)));}
-  } else if (coil.type === "elliptical") {
-    for (let i = 0; i < N; i++) {
-      const t=(i/N)*2*Math.PI;
-      pts.push(new THREE.Vector3(coil.semiMajor*Math.cos(t),0,coil.semiMinor*Math.sin(t)));
-    }
-  } else if (coil.type === "toroidal_winding" || coil.type === "elongated_toroidal_winding") {
-    const R = coil.majorRadius, r = coil.minorRadius;
-    const d = coil.type === "elongated_toroidal_winding" ? (coil.extension || 0) : 0;
-    const t = coil.windingIndex / coil.totalWindings;
-    const { dr, dh } = stadiumPoint(t, r, d);
-    const circleR = R + dr;
-    const circleY = dh;
-    for (let i = 0; i < N; i++) {
-      const a = (i/N)*2*Math.PI;
-      pts.push(new THREE.Vector3(circleR*Math.cos(a), circleY, circleR*Math.sin(a)));
-    }
+function basePath(c) {
+  const pts=[], N=200;
+  if (c.type==="circular") {
+    for(let i=0;i<N;i++){const t=(i/N)*2*Math.PI;pts.push(new THREE.Vector3(c.radius*Math.cos(t),0,c.radius*Math.sin(t)));}
+  } else if (c.type==="racetrack") {
+    const L=c.straightLength/2,R=c.arcRadius,seg=N/4|0;
+    for(let i=0;i<seg;i++) pts.push(new THREE.Vector3(-L+(i/seg)*2*L,0,-R));
+    for(let i=0;i<seg;i++){const a=(i/seg)*Math.PI;pts.push(new THREE.Vector3(L+R*Math.sin(a),0,-R*Math.cos(a)));}
+    for(let i=0;i<seg;i++) pts.push(new THREE.Vector3(L-(i/seg)*2*L,0,R));
+    for(let i=0;i<seg;i++){const a=(i/seg)*Math.PI;pts.push(new THREE.Vector3(-L-R*Math.sin(a),0,R*Math.cos(a)));}
+  } else if (c.type==="elliptical") {
+    for(let i=0;i<N;i++){const t=(i/N)*2*Math.PI;pts.push(new THREE.Vector3(c.semiMajor*Math.cos(t),0,c.semiMinor*Math.sin(t)));}
+  } else if (c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding") {
+    const R=c.majorRadius,r=c.minorRadius,d=c.type==="elongated_toroidal_winding"?(c.extension||0):0;
+    const {dr,dh}=stadiumPt(c.windingIndex/c.totalWindings,r,d);
+    const cR=R+dr;
+    for(let i=0;i<N;i++){const a=(i/N)*2*Math.PI;pts.push(new THREE.Vector3(cR*Math.cos(a),dh,cR*Math.sin(a)));}
   }
   return pts;
 }
 
-function applyOrientation(pts, coil) {
-  const n = new THREE.Vector3(...coil.normal).normalize();
-  if (n.length() < 0.001) n.set(0,1,0);
-  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), n);
-  const c = new THREE.Vector3(...coil.center);
-  return pts.map(p => p.applyQuaternion(q).add(c));
+function orient(pts, c) {
+  const n=new THREE.Vector3(...c.normal).normalize();
+  if(n.length()<.001)n.set(0,1,0);
+  const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n);
+  const ct=new THREE.Vector3(...c.center);
+  return pts.map(p=>p.applyQuaternion(q).add(ct));
 }
 
-function generatePath(coil) {
-  return applyOrientation(generateBasePath(coil), coil);
-}
+function fullPath(c) { return orient(basePath(c),c); }
 
-/* ── Individual turn paths ────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   INDIVIDUAL TURN PATHS
+   ══════════════════════════════════════════════════════════════ */
 
-function generateTurnPaths(coil) {
-  const { wd, turnsPerLayer, numLayers } = calcPacking(coil);
-  const paths = [];
-  let turnCount = 0;
-  const isToroidal = coil.type === "toroidal_winding" || coil.type === "elongated_toroidal_winding";
-
-  for (let layer = 0; layer < numLayers && turnCount < coil.turns; layer++) {
-    const turnsThisLayer = Math.min(turnsPerLayer, coil.turns - turnCount);
-    for (let j = 0; j < turnsThisLayer; j++) {
-      const tangentialOff = (j - turnsThisLayer/2 + 0.5) * wd;
-      const radialOff = (layer + 0.5) * wd;
-
-      if (isToroidal) {
-        const R = coil.majorRadius, r = coil.minorRadius;
-        const d = coil.type === "elongated_toroidal_winding" ? (coil.extension || 0) : 0;
-        const L = d > 0 ? stadiumPerimeter(r, d) : 2 * Math.PI * r;
-        const tBase = coil.windingIndex / coil.totalWindings;
-        const tOff = tangentialOff / L;
-        const { dr, dh, nr, nh } = stadiumPoint(tBase + tOff, r, d);
-        const circleR = R + dr + nr * radialOff;
-        const circleY = dh + nh * radialOff;
-        const pts = [];
-        for (let i = 0; i < 128; i++) {
-          const a = (i/128)*2*Math.PI;
-          pts.push(new THREE.Vector3(circleR*Math.cos(a), circleY, circleR*Math.sin(a)));
-        }
-        paths.push(applyOrientation(pts, coil));
+function turnPaths(coil) {
+  const {wd,tpl,layers}=calcPacking(coil);
+  const paths=[];
+  let count=0;
+  const isTor=coil.type==="toroidal_winding"||coil.type==="elongated_toroidal_winding";
+  for(let lay=0;lay<layers&&count<coil.turns;lay++){
+    const n=Math.min(tpl,coil.turns-count);
+    for(let j=0;j<n;j++){
+      const tOff=(j-n/2+.5)*wd;
+      const rOff=(lay+.5)*wd;
+      if(isTor){
+        const R=coil.majorRadius,r=coil.minorRadius;
+        const d=coil.type==="elongated_toroidal_winding"?(coil.extension||0):0;
+        const L2=d>0?stadiumPerim(r,d):2*Math.PI*r;
+        const tBase=coil.windingIndex/coil.totalWindings;
+        const {dr,dh,nr,nh}=stadiumPt(tBase+tOff/L2,r,d);
+        const cR=R+dr+nr*rOff, cY=dh+nh*rOff;
+        const pts=[];
+        for(let i=0;i<128;i++){const a=(i/128)*2*Math.PI;pts.push(new THREE.Vector3(cR*Math.cos(a),cY,cR*Math.sin(a)));}
+        paths.push(orient(pts,coil));
       } else {
-        const basePts = generateBasePath(coil);
-        const centroid = new THREE.Vector3();
-        basePts.forEach(p => centroid.add(p));
-        centroid.divideScalar(basePts.length);
-        const normalDir = new THREE.Vector3(0, 1, 0);
-        const offsetPts = basePts.map(p => {
-          const radialDir = p.clone().sub(centroid).normalize();
-          return p.clone()
-            .add(normalDir.clone().multiplyScalar(tangentialOff))
-            .add(radialDir.multiplyScalar(radialOff));
+        const bp=basePath(coil);
+        const cen=new THREE.Vector3();
+        bp.forEach(p=>cen.add(p));cen.divideScalar(bp.length);
+        const up=new THREE.Vector3(0,1,0);
+        const op=bp.map(p=>{
+          const rd=p.clone().sub(cen).normalize();
+          return p.clone().add(up.clone().multiplyScalar(tOff)).add(rd.multiplyScalar(rOff));
         });
-        paths.push(applyOrientation(offsetPts, coil));
+        paths.push(orient(op,coil));
       }
-      turnCount++;
+      count++;
     }
   }
   return paths;
 }
 
-/* ── Mesh builders ────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   MESH BUILDERS
+   ══════════════════════════════════════════════════════════════ */
 
-function buildTubeMesh(path, tubeR, color, emissive) {
-  const curve = new THREE.CatmullRomCurve3(path, true);
-  const segs = Math.min(200, Math.max(64, path.length));
-  const geom = new THREE.TubeGeometry(curve, segs, tubeR, 8, true);
-  const mat = new THREE.MeshStandardMaterial({
-    color: new THREE.Color(color),
-    emissive: new THREE.Color(emissive ? color : "#000"),
-    emissiveIntensity: emissive ? 0.5 : 0,
-    roughness: 0.4, metalness: 0.6,
-  });
-  return new THREE.Mesh(geom, mat);
+function tubeMesh(path,tubeR,color,emissive){
+  const curve=new THREE.CatmullRomCurve3(path,true);
+  const g=new THREE.TubeGeometry(curve,Math.min(200,Math.max(64,path.length)),tubeR,8,true);
+  const m=new THREE.MeshStandardMaterial({color:new THREE.Color(color),emissive:new THREE.Color(emissive?color:"#000"),emissiveIntensity:emissive?.5:0,roughness:.4,metalness:.6});
+  return new THREE.Mesh(g,m);
 }
 
-function buildCoilMeshes(coil, color, selected, visualScale, showIndividual) {
-  const meshes = [];
-  const wd = getWireDiam(coil.wireGauge);
-  const baseVisualR = wd / 2 * visualScale;
-
-  if (showIndividual && coil.turns > 1) {
-    const turnPaths = generateTurnPaths(coil);
-    const limit = 500;
-    const pathsToRender = turnPaths.slice(0, limit);
-    pathsToRender.forEach(tp => {
-      meshes.push(buildTubeMesh(tp, baseVisualR, color, selected));
-    });
+function buildCoilMeshes(coil,color,sel,showIndiv){
+  const meshes=[];
+  const wd=wireDiam(coil.wireGauge);
+  const vr=wd/2;
+  if(showIndiv&&coil.turns>1){
+    const tp=turnPaths(coil).slice(0,500);
+    tp.forEach(p=>meshes.push(tubeMesh(p,vr,color,sel)));
   } else {
-    const path = generatePath(coil);
-    const { numLayers, turnsPerLayer } = calcPacking(coil);
-    const bundleW = Math.min(coil.turns, turnsPerLayer) * wd;
-    const bundleH = numLayers * wd;
-    const bundleR = Math.sqrt(bundleW * bundleH / Math.PI) / 2;
-    const tubeR = coil.turns > 1 ? Math.max(bundleR * visualScale, baseVisualR) : baseVisualR;
-    meshes.push(buildTubeMesh(path, tubeR, color, selected));
+    const path=fullPath(coil);
+    const {layers,tpl}=calcPacking(coil);
+    const bW=Math.min(coil.turns,tpl)*wd, bH=layers*wd;
+    const bR=coil.turns>1?Math.max(Math.sqrt(bW*bH/Math.PI)/2,vr):vr;
+    meshes.push(tubeMesh(path,bR,color,sel));
   }
   return meshes;
 }
 
 /* ── Ghost surfaces ───────────────────────────────────────── */
 
-function buildGhostTorus(majorR, minorR, center, normal) {
-  const geom = new THREE.TorusGeometry(majorR, minorR, 32, 100);
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.07,
-    side: THREE.DoubleSide, depthWrite: false,
-  });
-  const mesh = new THREE.Mesh(geom, mat);
-  const n = new THREE.Vector3(...normal).normalize();
-  if (n.length() < 0.001) n.set(0,1,0);
-  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), n);
-  const flipQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI/2, 0, 0));
-  mesh.quaternion.copy(q.multiply(flipQ));
+function ghostTorus(R,r,center,normal){
+  const g=new THREE.TorusGeometry(R,r,32,100);
+  const m=new THREE.MeshStandardMaterial({color:0xffffff,transparent:true,opacity:.07,side:THREE.DoubleSide,depthWrite:false});
+  const mesh=new THREE.Mesh(g,m);
+  const n=new THREE.Vector3(...normal).normalize();
+  if(n.length()<.001)n.set(0,1,0);
+  const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n);
+  const fq=new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI/2,0,0));
+  mesh.quaternion.copy(q.multiply(fq));
   mesh.position.set(...center);
   return mesh;
 }
 
-function buildGhostElongatedTorus(majorR, minorR, ext, center, normal) {
-  const profilePts = [];
-  const nSeg = 64;
-  for (let i = 0; i <= nSeg; i++) {
-    const t = i / nSeg;
-    const { dr, dh } = stadiumPoint(t, minorR, ext);
-    profilePts.push(new THREE.Vector2(majorR + dr, dh));
-  }
-  const geom = new THREE.LatheGeometry(profilePts, 100);
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.07,
-    side: THREE.DoubleSide, depthWrite: false,
-  });
-  const mesh = new THREE.Mesh(geom, mat);
-  const n = new THREE.Vector3(...normal).normalize();
-  if (n.length() < 0.001) n.set(0,1,0);
-  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), n);
+function ghostElongTorus(R,r,ext,center,normal){
+  const pts=[];
+  for(let i=0;i<=64;i++){const{dr,dh}=stadiumPt(i/64,r,ext);pts.push(new THREE.Vector2(R+dr,dh));}
+  const g=new THREE.LatheGeometry(pts,100);
+  const m=new THREE.MeshStandardMaterial({color:0xffffff,transparent:true,opacity:.07,side:THREE.DoubleSide,depthWrite:false});
+  const mesh=new THREE.Mesh(g,m);
+  const n=new THREE.Vector3(...normal).normalize();
+  if(n.length()<.001)n.set(0,1,0);
+  const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n);
   mesh.quaternion.copy(q);
   mesh.position.set(...center);
   return mesh;
 }
 
-/* ── Scale markers ────────────────────────────────────────── */
+/* ── Scale markers (cm, every 5cm) ────────────────────────── */
 
-function buildScaleMarkers(maxRange) {
-  const group = new THREE.Group();
-  const axes = [
-    { dir: new THREE.Vector3(1,0,0), color: "#ef4444", label: "X" },
-    { dir: new THREE.Vector3(0,1,0), color: "#22c55e", label: "Y" },
-    { dir: new THREE.Vector3(0,0,1), color: "#3b82f6", label: "Z" },
-  ];
-  axes.forEach(({ dir, color }) => {
-    for (let i = -maxRange; i <= maxRange; i++) {
-      if (i === 0) continue;
-      const pos = dir.clone().multiplyScalar(i);
-      // Tick mark
-      const tickGeom = new THREE.SphereGeometry(0.02, 8, 8);
-      const tickMat = new THREE.MeshBasicMaterial({ color: new THREE.Color(color), transparent: true, opacity: 0.5 });
-      const tick = new THREE.Mesh(tickGeom, tickMat);
-      tick.position.copy(pos);
-      group.add(tick);
-      // Label
-      const canvas = document.createElement("canvas");
-      canvas.width = 64; canvas.height = 32;
-      const ctx = canvas.getContext("2d");
-      ctx.fillStyle = color; ctx.font = "bold 24px monospace";
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(String(i), 32, 16);
-      const spriteMat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false, transparent: true, opacity: 0.6 });
-      const sprite = new THREE.Sprite(spriteMat);
-      sprite.position.copy(pos).add(new THREE.Vector3(0, 0.08, 0));
-      sprite.scale.set(0.12, 0.06, 0.12);
-      group.add(sprite);
+function buildScales(maxCm){
+  const g=new THREE.Group();
+  const axes=[{d:new THREE.Vector3(1,0,0),c:"#ef4444"},{d:new THREE.Vector3(0,1,0),c:"#22c55e"},{d:new THREE.Vector3(0,0,1),c:"#3b82f6"}];
+  axes.forEach(({d,c})=>{
+    for(let cm=-maxCm;cm<=maxCm;cm+=5){
+      if(cm===0)continue;
+      const pos=d.clone().multiplyScalar(cm/100);
+      const sg=new THREE.SphereGeometry(.005,6,6);
+      const sm=new THREE.MeshBasicMaterial({color:new THREE.Color(c),transparent:true,opacity:.5});
+      const tick=new THREE.Mesh(sg,sm);tick.position.copy(pos);g.add(tick);
+      const cv=document.createElement("canvas");cv.width=96;cv.height=32;
+      const ctx=cv.getContext("2d");ctx.fillStyle=c;ctx.font="bold 22px monospace";
+      ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(cm+"cm",48,16);
+      const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false,transparent:true,opacity:.6}));
+      sp.position.copy(pos).add(new THREE.Vector3(0,.03,0));sp.scale.set(.1,.035,.1);g.add(sp);
     }
   });
-  return group;
+  return g;
 }
 
-function makeLabel(text, pos, color) {
-  const canvas = document.createElement("canvas");
-  canvas.width = 64; canvas.height = 64;
-  const ctx = canvas.getContext("2d");
-  ctx.fillStyle = color; ctx.font = "bold 48px monospace";
-  ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(text, 32, 32);
-  const mat = new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false });
-  const sprite = new THREE.Sprite(mat);
-  sprite.position.copy(pos); sprite.scale.set(0.15,0.15,0.15);
-  return sprite;
+function makeLabel(text,pos,color){
+  const cv=document.createElement("canvas");cv.width=64;cv.height=64;
+  const ctx=cv.getContext("2d");ctx.fillStyle=color;ctx.font="bold 48px monospace";
+  ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(text,32,32);
+  const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false}));
+  s.position.copy(pos);s.scale.set(.15,.15,.15);return s;
 }
 
-/* ── Claude API ───────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   PHYSICS CALCULATIONS
+   ══════════════════════════════════════════════════════════════ */
 
-const SYSTEM_PROMPT = `You are a coil geometry interpreter. Parse the user's plain-English description into a JSON array.
+function coilCircumference(c){
+  if(c.type==="circular") return 2*Math.PI*c.radius;
+  if(c.type==="racetrack") return 2*c.straightLength+2*Math.PI*c.arcRadius;
+  if(c.type==="elliptical"){const a=c.semiMajor,b=c.semiMinor,h=((a-b)/(a+b))**2;return Math.PI*(a+b)*(1+3*h/(10+Math.sqrt(4-3*h)));}
+  if(c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding"){
+    const R=c.majorRadius,r=c.minorRadius,d=c.type==="elongated_toroidal_winding"?(c.extension||0):0;
+    const{dr}=stadiumPt(c.windingIndex/c.totalWindings,r,d);
+    return 2*Math.PI*(R+dr);
+  }
+  return 0;
+}
 
-COORDINATE SYSTEM: right-handed, Y is up. Units: metres.
+function calcStats(coils){
+  let totalLen=0, totalPower=0, totalMass=0;
+  coils.forEach(c=>{
+    const L=coilCircumference(c)*c.turns;
+    const A=Math.PI*(wireDiam(c.wireGauge)/2)**2;
+    const R=CU_RHO*L/A;
+    totalLen+=L;
+    totalPower+=c.current**2*R;
+    totalMass+=L*A*CU_DENSITY;
+  });
+  return {totalLen,totalPower,totalMass};
+}
+
+function estimateB(coils,pt){
+  let Bx=0,By=0,Bz=0;
+  coils.forEach(c=>{
+    let R,cen,norm,NI;
+    const isTor=c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding";
+    if(isTor){
+      const mr=c.majorRadius,rr=c.minorRadius,d=c.type==="elongated_toroidal_winding"?(c.extension||0):0;
+      const{dr,dh}=stadiumPt(c.windingIndex/c.totalWindings,rr,d);
+      R=mr+dr;
+      cen=new THREE.Vector3(0,dh,0);
+      norm=new THREE.Vector3(0,1,0);
+      const n2=new THREE.Vector3(...c.normal).normalize();
+      const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n2);
+      cen.applyQuaternion(q).add(new THREE.Vector3(...c.center));
+      norm.applyQuaternion(q);
+    } else if(c.type==="circular"){
+      R=c.radius;cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
+    } else if(c.type==="racetrack"){
+      R=Math.sqrt((c.straightLength*2*c.arcRadius+Math.PI*c.arcRadius**2)/Math.PI);
+      cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
+    } else if(c.type==="elliptical"){
+      R=Math.sqrt(c.semiMajor*c.semiMinor);
+      cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
+    } else return;
+    NI=c.turns*c.current;
+    const rv=pt.clone().sub(cen);
+    const dist=rv.length();
+    if(dist<1e-10){
+      const Bm=MU0*NI/(2*R);
+      Bx+=Bm*norm.x;By+=Bm*norm.y;Bz+=Bm*norm.z;return;
+    }
+    const z=rv.dot(norm);
+    const rPerp=rv.clone().sub(norm.clone().multiplyScalar(z));
+    const rho=rPerp.length();
+    if(rho<.01*R){
+      const Bm=MU0*NI*R*R/(2*Math.pow(R*R+z*z,1.5));
+      Bx+=Bm*norm.x;By+=Bm*norm.y;Bz+=Bm*norm.z;
+    } else {
+      const m=NI*Math.PI*R*R;
+      const mV=norm.clone().multiplyScalar(m);
+      const rH=rv.clone().normalize();
+      const md=mV.dot(rH);
+      const co=MU0/(4*Math.PI*dist**3);
+      Bx+=co*(3*md*rH.x-mV.x);By+=co*(3*md*rH.y-mV.y);Bz+=co*(3*md*rH.z-mV.z);
+    }
+  });
+  const mag=Math.sqrt(Bx*Bx+By*By+Bz*Bz);
+  return {Bx,By,Bz,mag};
+}
+
+function fmtB(v){
+  if(v<1e-9) return (v*1e12).toFixed(2)+" pT";
+  if(v<1e-6) return (v*1e9).toFixed(2)+" nT";
+  if(v<1e-3) return (v*1e6).toFixed(2)+" µT";
+  if(v<1) return (v*1e3).toFixed(2)+" mT";
+  return v.toFixed(4)+" T";
+}
+
+/* ══════════════════════════════════════════════════════════════
+   CLAUDE API
+   ══════════════════════════════════════════════════════════════ */
+
+const SYS_PROMPT=`You are a coil geometry interpreter. Parse plain-English descriptions into a JSON array.
+
+COORDINATE SYSTEM: right-handed, Y up. Units: metres. All geometries centered at origin unless stated otherwise.
 
 COIL TYPES:
-
 1. "circular" — planar circular loop.
-2. "racetrack" — two straight segments joined by semicircular arcs.
+2. "racetrack" — two straight segments + semicircular arcs.
 3. "elliptical" — planar elliptical loop.
-4. "toroidal_winding" — a wire loop on the surface of a standard torus, tracing a toroidal-direction circle at a fixed poloidal angle. For N windings, output N coils with windingIndex 0 to N-1.
-   majorRadius = (innerRadius + outerRadius) / 2
-   minorRadius = (outerRadius - innerRadius) / 2
-5. "elongated_toroidal_winding" — same as toroidal_winding but the torus cross-section is a stadium shape (two semicircles connected by straight walls). The extension parameter is the length of the straight wall section (distance the two halves are pulled apart). For N windings, output N coils with windingIndex 0 to N-1.
-   majorRadius, minorRadius computed same as toroidal_winding.
-   extension = the separation distance between the two halves.
+4. "toroidal_winding" — wire on torus surface, toroidal direction, fixed poloidal angle. N windings = N coils with windingIndex 0..N-1.
+   majorRadius=(innerRadius+outerRadius)/2, minorRadius=(outerRadius-innerRadius)/2.
+5. "elongated_toroidal_winding" — same but cross-section is stadium (semicircles + straight walls). extension = straight wall length (separation distance).
 
-Each coil MUST contain ALL fields:
-{"type":"circular"|"racetrack"|"elliptical"|"toroidal_winding"|"elongated_toroidal_winding","name":"label","center":[x,y,z],"normal":[nx,ny,nz],"radius":0.5,"semiMajor":0.5,"semiMinor":0.3,"straightLength":0.6,"arcRadius":0.3,"majorRadius":0.1,"minorRadius":0.05,"extension":0.0,"windingIndex":0,"totalWindings":12,"turns":100,"current":10.0,"wireGauge":14,"windingLayers":1,"channelWidth":0.01}
+Each coil MUST have ALL fields:
+{"type":"...","name":"...","center":[x,y,z],"normal":[nx,ny,nz],"radius":0.5,"semiMajor":0.5,"semiMinor":0.3,"straightLength":0.6,"arcRadius":0.3,"majorRadius":0.1,"minorRadius":0.05,"extension":0.0,"windingIndex":0,"totalWindings":12,"turns":100,"current":10.0,"wireGauge":14,"channelWidth":0.01}
 
-Always include every field with sensible defaults for unused ones.
-Defaults if unspecified: turns=100, current=10, wireGauge=14, windingLayers=1, normal=[0,1,0], channelWidth=0.01.
-Respond with ONLY valid JSON array. No markdown, no backticks, no explanation.`;
+Defaults: turns=100,current=10,wireGauge=14,normal=[0,1,0],channelWidth=0.01,center=[0,0,0].
+Respond ONLY with valid JSON array.`;
 
-async function parseWithClaude(prompt) {
-  const res = await fetch("/api/parse", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 8000,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content: prompt }],
-    }),
-  });
-  const data = await res.json();
-  const text = data.content?.map(b => b.text || "").join("") || "";
-  return JSON.parse(text.replace(/```json|```/g, "").trim());
+async function parseWithClaude(prompt){
+  const res=await fetch("/api/parse",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({model:"claude-sonnet-4-20250514",max_tokens:8000,system:SYS_PROMPT,messages:[{role:"user",content:prompt}]})});
+  const data=await res.json();
+  const text=data.content?.map(b=>b.text||"").join("")||"";
+  return JSON.parse(text.replace(/```json|```/g,"").trim());
 }
 
-/* ── UI components ────────────────────────────────────────── */
+/* ══════════════════════════════════════════════════════════════
+   UI COMPONENTS
+   ══════════════════════════════════════════════════════════════ */
 
-function Num({ label, value, onChange, step = 0.01 }) {
-  return (
-    <label className="flex items-center gap-1 text-xs text-gray-300">
-      <span className="w-24 text-right text-gray-500 shrink-0">{label}</span>
-      <input type="number" step={step} value={value}
-        onChange={e => onChange(parseFloat(e.target.value) || 0)}
-        className="w-20 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-gray-200 text-xs focus:border-blue-500 outline-none" />
-    </label>
-  );
+function Num({label,value,onChange,step=0.01}){
+  return(<label className="flex items-center gap-1 text-xs text-gray-300">
+    <span className="w-24 text-right text-gray-500 shrink-0">{label}</span>
+    <input type="number" step={step} value={value} onChange={e=>onChange(parseFloat(e.target.value)||0)}
+      className="w-20 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-gray-200 text-xs focus:border-blue-500 outline-none"/>
+  </label>);
 }
 
-function Vec3({ label, value, onChange }) {
-  const set = (i, v) => { const a = [...value]; a[i] = v; onChange(a); };
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span className="text-xs text-gray-500 ml-1">{label}</span>
-      <div className="flex gap-1 ml-1">
-        {["x","y","z"].map((ax, i) => (
-          <label key={ax} className="flex items-center gap-0.5 text-xs text-gray-400">
-            {ax}<input type="number" step={0.01} value={value[i]}
-              onChange={e => set(i, parseFloat(e.target.value) || 0)}
-              className="w-14 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-gray-200 text-xs focus:border-blue-500 outline-none" />
-          </label>
-        ))}
+function Vec3({label,value,onChange}){
+  const s=(i,v)=>{const a=[...value];a[i]=v;onChange(a);};
+  return(<div className="flex flex-col gap-0.5"><span className="text-xs text-gray-500 ml-1">{label}</span>
+    <div className="flex gap-1 ml-1">{["x","y","z"].map((ax,i)=>(
+      <label key={ax} className="flex items-center gap-0.5 text-xs text-gray-400">{ax}
+        <input type="number" step={0.01} value={value[i]} onChange={e=>s(i,parseFloat(e.target.value)||0)}
+          className="w-14 bg-gray-800 border border-gray-700 rounded px-1 py-0.5 text-gray-200 text-xs focus:border-blue-500 outline-none"/>
+      </label>))}</div></div>);
+}
+
+function CoilCard({coil,index,selected,multiSelected,onSelect,onShiftSelect,onUpdate,onDelete,onDuplicate}){
+  const[open,setOpen]=useState(false);
+  const color=COLORS[index%COLORS.length];
+  const set=(k,v)=>onUpdate({...coil,[k]:v});
+  const isTor=coil.type==="toroidal_winding"||coil.type==="elongated_toroidal_winding";
+  const pk=calcPacking(coil);
+  const highlight=selected||multiSelected;
+  return(
+    <div className={`border rounded-lg overflow-hidden mb-1.5 transition-colors ${highlight?"border-blue-500 bg-gray-800/60":"border-gray-700 bg-gray-900/40"}`}>
+      <div className="flex items-center gap-2 px-3 py-1.5 cursor-pointer"
+        onClick={e=>{if(e.shiftKey)onShiftSelect(coil.id);else{onSelect(coil.id);setOpen(!open);}}}> 
+        <div className="w-3 h-3 rounded-full shrink-0" style={{backgroundColor:color}}/>
+        <input value={coil.name} onChange={e=>set("name",e.target.value)} onClick={e=>e.stopPropagation()}
+          className="flex-1 bg-transparent text-sm text-gray-200 font-medium outline-none"/>
+        <span className="text-gray-600 text-xs">{open?"▾":"▸"}</span>
       </div>
-    </div>
-  );
-}
-
-function CoilCard({ coil, index, selected, onSelect, onUpdate, onDelete }) {
-  const [open, setOpen] = useState(true);
-  const color = COLORS[index % COLORS.length];
-  const set = (k, v) => onUpdate({ ...coil, [k]: v });
-  const packing = calcPacking(coil);
-  const isToroidal = coil.type === "toroidal_winding" || coil.type === "elongated_toroidal_winding";
-
-  return (
-    <div className={`border rounded-lg overflow-hidden mb-2 transition-colors ${selected ? "border-blue-500 bg-gray-800/60" : "border-gray-700 bg-gray-900/40"}`}>
-      <div className="flex items-center gap-2 px-3 py-2 cursor-pointer" onClick={() => { setOpen(!open); onSelect(coil.id); }}>
-        <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: color }} />
-        <input value={coil.name} onChange={e => set("name", e.target.value)} onClick={e => e.stopPropagation()}
-          className="flex-1 bg-transparent text-sm text-gray-200 font-medium outline-none" />
-        <span className="text-gray-600 text-xs">{open ? "▾" : "▸"}</span>
-      </div>
-      {open && (
-        <div className="px-3 pb-3 flex flex-col gap-2 text-xs" onClick={e => e.stopPropagation()}>
+      {open&&(
+        <div className="px-3 pb-2 flex flex-col gap-1.5 text-xs" onClick={e=>e.stopPropagation()}>
           <label className="flex items-center gap-1 text-gray-400">
             <span className="w-24 text-right text-gray-500">Type</span>
-            <select value={coil.type} onChange={e => set("type", e.target.value)}
+            <select value={coil.type} onChange={e=>set("type",e.target.value)}
               className="bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-gray-200 text-xs outline-none">
-              <option value="circular">Circular</option>
-              <option value="racetrack">Racetrack</option>
-              <option value="elliptical">Elliptical</option>
-              <option value="toroidal_winding">Toroidal Winding</option>
+              <option value="circular">Circular</option><option value="racetrack">Racetrack</option>
+              <option value="elliptical">Elliptical</option><option value="toroidal_winding">Toroidal Winding</option>
               <option value="elongated_toroidal_winding">Elongated Toroidal</option>
             </select>
           </label>
-          <Vec3 label="Center (m)" value={coil.center} onChange={v => set("center", v)} />
-          <Vec3 label="Normal" value={coil.normal} onChange={v => set("normal", v)} />
-
-          {coil.type === "circular" && <Num label="Radius (m)" value={coil.radius} onChange={v => set("radius", v)} />}
-          {coil.type === "racetrack" && <>
-            <Num label="Straight (m)" value={coil.straightLength} onChange={v => set("straightLength", v)} />
-            <Num label="Arc R (m)" value={coil.arcRadius} onChange={v => set("arcRadius", v)} />
-          </>}
-          {coil.type === "elliptical" && <>
-            <Num label="Semi-maj (m)" value={coil.semiMajor} onChange={v => set("semiMajor", v)} />
-            <Num label="Semi-min (m)" value={coil.semiMinor} onChange={v => set("semiMinor", v)} />
-          </>}
-          {isToroidal && <>
-            <Num label="Major R (m)" value={coil.majorRadius} onChange={v => set("majorRadius", v)} />
-            <Num label="Minor R (m)" value={coil.minorRadius} onChange={v => set("minorRadius", v)} />
-            {coil.type === "elongated_toroidal_winding" &&
-              <Num label="Extension (m)" value={coil.extension} onChange={v => set("extension", v)} />
-            }
-            <Num label="Winding #" value={coil.windingIndex} onChange={v => set("windingIndex", v)} step={1} />
-            <Num label="Total winds" value={coil.totalWindings} onChange={v => set("totalWindings", v)} step={1} />
-          </>}
-
-          <div className="border-t border-gray-800 pt-2 mt-1" />
-          <Num label="Turns" value={coil.turns} onChange={v => set("turns", v)} step={1} />
-          <Num label="Current (A)" value={coil.current} onChange={v => set("current", v)} step={0.1} />
-          <Num label="AWG" value={coil.wireGauge} onChange={v => set("wireGauge", v)} step={1} />
-          <Num label="Channel (m)" value={coil.channelWidth} onChange={v => set("channelWidth", v)} step={0.001} />
-
-          {/* Packing info */}
+          <Vec3 label="Center (m)" value={coil.center} onChange={v=>set("center",v)}/>
+          <Vec3 label="Normal" value={coil.normal} onChange={v=>set("normal",v)}/>
+          {coil.type==="circular"&&<Num label="Radius (m)" value={coil.radius} onChange={v=>set("radius",v)}/>}
+          {coil.type==="racetrack"&&<><Num label="Straight (m)" value={coil.straightLength} onChange={v=>set("straightLength",v)}/>
+            <Num label="Arc R (m)" value={coil.arcRadius} onChange={v=>set("arcRadius",v)}/></>}
+          {coil.type==="elliptical"&&<><Num label="Semi-maj (m)" value={coil.semiMajor} onChange={v=>set("semiMajor",v)}/>
+            <Num label="Semi-min (m)" value={coil.semiMinor} onChange={v=>set("semiMinor",v)}/></>}
+          {isTor&&<><Num label="Major R (m)" value={coil.majorRadius} onChange={v=>set("majorRadius",v)}/>
+            <Num label="Minor R (m)" value={coil.minorRadius} onChange={v=>set("minorRadius",v)}/>
+            {coil.type==="elongated_toroidal_winding"&&<Num label="Extension (m)" value={coil.extension} onChange={v=>set("extension",v)}/>}
+            <Num label="Winding #" value={coil.windingIndex} onChange={v=>set("windingIndex",v)} step={1}/>
+            <Num label="Total winds" value={coil.totalWindings} onChange={v=>set("totalWindings",v)} step={1}/></>}
+          <div className="border-t border-gray-800 pt-1.5 mt-1"/>
+          <Num label="Turns" value={coil.turns} onChange={v=>set("turns",v)} step={1}/>
+          <Num label="Current (A)" value={coil.current} onChange={v=>set("current",v)} step={0.1}/>
+          <Num label="AWG" value={coil.wireGauge} onChange={v=>set("wireGauge",v)} step={1}/>
+          <Num label="Channel (m)" value={coil.channelWidth} onChange={v=>set("channelWidth",v)} step={0.001}/>
           <div className="bg-gray-800/50 rounded px-2 py-1 text-gray-500 text-xs">
-            Wire: {(packing.wd*1000).toFixed(2)}mm | {packing.turnsPerLayer}/layer | {packing.numLayers} layers
+            Wire: {(pk.wd*1000).toFixed(2)}mm | {pk.tpl}/layer | {pk.layers} layers
           </div>
-
-          <button onClick={() => onDelete(coil.id)} className="mt-1 text-red-400 hover:text-red-300 text-xs self-end">Delete</button>
+          <div className="flex gap-2 mt-1">
+            <button onClick={()=>onDuplicate(coil.id)} className="text-blue-400 hover:text-blue-300 text-xs">Duplicate</button>
+            <button onClick={()=>onDelete(coil.id)} className="text-red-400 hover:text-red-300 text-xs ml-auto">Delete</button>
+          </div>
         </div>
       )}
     </div>
   );
 }
 
-/* ── Settings panel ───────────────────────────────────────── */
+/* ── Universal settings ───────────────────────────────────── */
 
-function SettingsPanel({ showScales, setShowScales, showIndividual, setShowIndividual, visualScale, setVisualScale }) {
-  return (
-    <div className="border-t border-gray-800 px-3 py-2 flex flex-col gap-2 bg-gray-900/30">
-      <span className="text-xs text-gray-400 font-medium">Display Settings</span>
-      <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
-        <input type="checkbox" checked={showScales} onChange={e => setShowScales(e.target.checked)}
-          className="rounded border-gray-600" />
-        Axis scales
-      </label>
-      <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
-        <input type="checkbox" checked={showIndividual} onChange={e => setShowIndividual(e.target.checked)}
-          className="rounded border-gray-600" />
-        Individual turns
-      </label>
-      <label className="flex flex-col gap-1 text-xs text-gray-400">
-        <span>Visual wire width: {visualScale.toFixed(1)}x</span>
-        <input type="range" min="0.5" max="20" step="0.5" value={visualScale}
-          onChange={e => setVisualScale(parseFloat(e.target.value))}
-          className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer" />
-      </label>
+function UniversalPanel({onApply}){
+  const[vals,setVals]=useState({turns:100,current:10,wireGauge:14,channelWidth:0.01});
+  const[fields,setFields]=useState({turns:true,current:true,wireGauge:true,channelWidth:true});
+  const s=(k,v)=>setVals(p=>({...p,[k]:v}));
+  const f=(k)=>setFields(p=>({...p,[k]:!p[k]}));
+  return(
+    <div className="border-t border-gray-800 px-3 py-2 bg-gray-900/30">
+      <span className="text-xs text-gray-400 font-medium">Apply to All / Selected</span>
+      <div className="flex flex-col gap-1 mt-1.5">
+        {[["turns","Turns",1],["current","Current (A)",0.1],["wireGauge","AWG",1],["channelWidth","Channel (m)",0.001]].map(([k,l,st])=>(
+          <div key={k} className="flex items-center gap-1">
+            <input type="checkbox" checked={fields[k]} onChange={()=>f(k)} className="rounded border-gray-600"/>
+            <Num label={l} value={vals[k]} onChange={v=>s(k,v)} step={st}/>
+          </div>
+        ))}
+        <button onClick={()=>onApply(vals,fields)}
+          className="mt-1 px-3 py-1 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded self-start">
+          Apply
+        </button>
+      </div>
     </div>
   );
 }
 
-/* ── Main app ─────────────────────────────────────────────── */
+/* ── Info box ─────────────────────────────────────────────── */
 
-export default function App() {
-  const [coils, setCoils] = useState([]);
-  const [selectedId, setSelectedId] = useState(null);
-  const [prompt, setPrompt] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(null);
-  const [showScales, setShowScales] = useState(false);
-  const [showIndividual, setShowIndividual] = useState(false);
-  const [visualScale, setVisualScale] = useState(5);
+function InfoBox({coils,show,setShow}){
+  if(!show||coils.length===0) return(
+    <button onClick={()=>setShow(true)} className="absolute bottom-3 right-3 px-2 py-1 bg-gray-800/80 text-gray-400 text-xs rounded hover:bg-gray-700 z-10">
+      Stats
+    </button>
+  );
+  const stats=calcStats(coils);
+  const bOrigin=estimateB(coils,new THREE.Vector3(0,0,0));
+  const b30=estimateB(coils,new THREE.Vector3(0.3,0,0));
+  return(
+    <div className="absolute bottom-3 right-3 bg-gray-900/95 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 z-10 min-w-56">
+      <div className="flex justify-between items-center mb-2">
+        <span className="font-medium text-gray-200">Configuration Stats</span>
+        <button onClick={()=>setShow(false)} className="text-gray-500 hover:text-gray-300">✕</button>
+      </div>
+      <div className="flex flex-col gap-1">
+        <div>Total wire: <span className="text-gray-100">{stats.totalLen<1?(stats.totalLen*100).toFixed(1)+" cm":stats.totalLen.toFixed(2)+" m"}</span></div>
+        <div>Copper mass: <span className="text-gray-100">{stats.totalMass<1?(stats.totalMass*1000).toFixed(1)+" g":stats.totalMass.toFixed(3)+" kg"}</span></div>
+        <div>Power (I²R): <span className="text-gray-100">{stats.totalPower<1?(stats.totalPower*1000).toFixed(2)+" mW":stats.totalPower.toFixed(3)+" W"}</span></div>
+        <div className="border-t border-gray-800 pt-1 mt-1"/>
+        <div>|B| at origin: <span className="text-yellow-300">{fmtB(bOrigin.mag)}</span></div>
+        <div className="text-gray-500 ml-2">({fmtB(Math.abs(bOrigin.Bx))} x, {fmtB(Math.abs(bOrigin.By))} y, {fmtB(Math.abs(bOrigin.Bz))} z)</div>
+        <div>|B| at 30cm radial: <span className="text-yellow-300">{fmtB(b30.mag)}</span></div>
+        <div className="text-gray-500 ml-2">({fmtB(Math.abs(b30.Bx))} x, {fmtB(Math.abs(b30.By))} y, {fmtB(Math.abs(b30.Bz))} z)</div>
+        <div className="text-gray-600 mt-1 italic">B estimates use dipole/on-axis approx.</div>
+      </div>
+    </div>
+  );
+}
 
-  const containerRef = useRef(null);
-  const sceneRef = useRef(null);
-  const cameraRef = useRef(null);
-  const rendererRef = useRef(null);
-  const coilGroupRef = useRef(null);
-  const scaleGroupRef = useRef(null);
-  const frameRef = useRef(null);
-  const orbitRef = useRef({ theta: Math.PI/4, phi: Math.PI/3, dist: 4, target: new THREE.Vector3(), dragging: false, panning: false, lastX: 0, lastY: 0 });
+/* ── Save/Load ────────────────────────────────────────────── */
+
+function SaveLoadPanel({coils,onLoad}){
+  const[name,setName]=useState("");
+  const[open,setOpen]=useState(false);
+  const getSaved=()=>{try{return JSON.parse(localStorage.getItem("coilConfigs")||"{}");}catch{return {};}};
+  const save=()=>{if(!name.trim())return;const s=getSaved();s[name.trim()]=coils.map(({id,...r})=>r);localStorage.setItem("coilConfigs",JSON.stringify(s));setName("");};
+  const load=(k)=>{const s=getSaved();if(s[k])onLoad(s[k].map(c=>defaultCoil(c)));};
+  const del=(k)=>{const s=getSaved();delete s[k];localStorage.setItem("coilConfigs",JSON.stringify(s));setOpen(o=>!o);setTimeout(()=>setOpen(o=>!o),0);};
+  const saved=getSaved();
+  const keys=Object.keys(saved);
+  return(
+    <div className="border-t border-gray-800 px-3 py-2 bg-gray-900/30">
+      <div className="flex items-center justify-between cursor-pointer" onClick={()=>setOpen(!open)}>
+        <span className="text-xs text-gray-400 font-medium">Save / Load</span>
+        <span className="text-gray-600 text-xs">{open?"▾":"▸"}</span>
+      </div>
+      {open&&(
+        <div className="mt-1.5 flex flex-col gap-1.5">
+          <div className="flex gap-1">
+            <input value={name} onChange={e=>setName(e.target.value)} placeholder="Config name..."
+              className="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-gray-200 text-xs outline-none"/>
+            <button onClick={save} className="px-2 py-0.5 bg-blue-600 hover:bg-blue-500 text-white text-xs rounded">Save</button>
+          </div>
+          {keys.length>0&&(
+            <div className="flex flex-col gap-0.5 max-h-24 overflow-y-auto">
+              {keys.map(k=>(
+                <div key={k} className="flex items-center justify-between bg-gray-800/50 rounded px-2 py-0.5">
+                  <button onClick={()=>load(k)} className="text-xs text-gray-300 hover:text-white">{k}</button>
+                  <button onClick={()=>del(k)} className="text-red-500 hover:text-red-400 text-xs">✕</button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MAIN APP
+   ══════════════════════════════════════════════════════════════ */
+
+export default function App(){
+  const[coils,setCoils]=useState([]);
+  const[selectedId,setSelectedId]=useState(null);
+  const[multiSel,setMultiSel]=useState(new Set());
+  const[prompt,setPrompt]=useState("");
+  const[loading,setLoading]=useState(false);
+  const[error,setError]=useState(null);
+  const[showScales,setShowScales]=useState(true);
+  const[showIndiv,setShowIndiv]=useState(false);
+  const[showStats,setShowStats]=useState(true);
+
+  // Undo/redo
+  const histRef=useRef([[]]);
+  const histIdx=useRef(0);
+  const skipHist=useRef(false);
+
+  const pushCoils=useCallback((nc)=>{
+    if(!skipHist.current){
+      histRef.current=histRef.current.slice(0,histIdx.current+1);
+      histRef.current.push(JSON.parse(JSON.stringify(nc)));
+      histIdx.current++;
+    }
+    setCoils(nc);
+  },[]);
+
+  useEffect(()=>{
+    const handler=(e)=>{
+      if((e.metaKey||e.ctrlKey)&&e.key==="z"){
+        e.preventDefault();
+        skipHist.current=true;
+        if(e.shiftKey){
+          if(histIdx.current<histRef.current.length-1){histIdx.current++;setCoils(JSON.parse(JSON.stringify(histRef.current[histIdx.current])));}
+        } else {
+          if(histIdx.current>0){histIdx.current--;setCoils(JSON.parse(JSON.stringify(histRef.current[histIdx.current])));}
+        }
+        setTimeout(()=>{skipHist.current=false;},0);
+      }
+    };
+    window.addEventListener("keydown",handler);
+    return()=>window.removeEventListener("keydown",handler);
+  },[]);
+
+  // Three.js refs
+  const containerRef=useRef(null);
+  const sceneRef=useRef(null);
+  const cameraRef=useRef(null);
+  const rendererRef=useRef(null);
+  const coilGroupRef=useRef(null);
+  const scaleGroupRef=useRef(null);
+  const frameRef=useRef(null);
+  const orbitRef=useRef({theta:Math.PI/4,phi:Math.PI/3,dist:1.5,target:new THREE.Vector3(),dragging:false,panning:false,lastX:0,lastY:0});
 
   /* ── Init Three.js ───────────────────────────────────── */
-  useEffect(() => {
-    const el = containerRef.current; if (!el) return;
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color("#0d1117");
-    sceneRef.current = scene;
-    const camera = new THREE.PerspectiveCamera(50, el.clientWidth/el.clientHeight, 0.001, 200);
-    cameraRef.current = camera;
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setSize(el.clientWidth, el.clientHeight);
-    renderer.setPixelRatio(window.devicePixelRatio);
-    el.appendChild(renderer.domElement);
-    rendererRef.current = renderer;
+  useEffect(()=>{
+    const el=containerRef.current;if(!el)return;
+    const scene=new THREE.Scene();scene.background=new THREE.Color("#0d1117");sceneRef.current=scene;
+    const camera=new THREE.PerspectiveCamera(50,el.clientWidth/el.clientHeight,.001,200);cameraRef.current=camera;
+    const renderer=new THREE.WebGLRenderer({antialias:true});
+    renderer.setSize(el.clientWidth,el.clientHeight);renderer.setPixelRatio(window.devicePixelRatio);
+    el.appendChild(renderer.domElement);rendererRef.current=renderer;
 
-    scene.add(new THREE.AmbientLight(0xffffff, 0.4));
-    const dir = new THREE.DirectionalLight(0xffffff, 0.8);
-    dir.position.set(3,5,4); scene.add(dir);
-    scene.add(new THREE.HemisphereLight(0x4488ff, 0x222244, 0.3));
-    scene.add(new THREE.GridHelper(6, 30, 0x333333, 0x1a1a2e));
-    scene.add(new THREE.AxesHelper(1.5));
-    scene.add(makeLabel("X", new THREE.Vector3(1.65,0,0), "#ef4444"));
-    scene.add(makeLabel("Y", new THREE.Vector3(0,1.65,0), "#22c55e"));
-    scene.add(makeLabel("Z", new THREE.Vector3(0,0,1.65), "#3b82f6"));
+    scene.add(new THREE.AmbientLight(0xffffff,.5));
+    const d=new THREE.DirectionalLight(0xffffff,.8);d.position.set(3,5,4);scene.add(d);
+    scene.add(new THREE.HemisphereLight(0x4488ff,0x222244,.3));
+    scene.add(new THREE.GridHelper(2,40,0x333333,0x1a1a2e));
+    scene.add(new THREE.AxesHelper(.5));
+    scene.add(makeLabel("X",new THREE.Vector3(.55,0,0),"#ef4444"));
+    scene.add(makeLabel("Y",new THREE.Vector3(0,.55,0),"#22c55e"));
+    scene.add(makeLabel("Z",new THREE.Vector3(0,0,.55),"#3b82f6"));
 
-    const cg = new THREE.Group(); scene.add(cg); coilGroupRef.current = cg;
-    const sg = new THREE.Group(); sg.visible = false; scene.add(sg); scaleGroupRef.current = sg;
+    const cg=new THREE.Group();scene.add(cg);coilGroupRef.current=cg;
+    const sg=buildScales(50);scene.add(sg);scaleGroupRef.current=sg;
 
-    const o = orbitRef.current;
-    camera.position.set(o.dist*Math.sin(o.phi)*Math.cos(o.theta), o.dist*Math.cos(o.phi), o.dist*Math.sin(o.phi)*Math.sin(o.theta));
+    const o=orbitRef.current;
+    camera.position.set(o.target.x+o.dist*Math.sin(o.phi)*Math.cos(o.theta),o.target.y+o.dist*Math.cos(o.phi),o.target.z+o.dist*Math.sin(o.phi)*Math.sin(o.theta));
     camera.lookAt(o.target);
 
-    function animate() { frameRef.current = requestAnimationFrame(animate); renderer.render(scene, camera); }
+    function animate(){frameRef.current=requestAnimationFrame(animate);renderer.render(scene,camera);}
     animate();
 
-    const onResize = () => { camera.aspect=el.clientWidth/el.clientHeight; camera.updateProjectionMatrix(); renderer.setSize(el.clientWidth, el.clientHeight); };
-    window.addEventListener("resize", onResize);
-    return () => { cancelAnimationFrame(frameRef.current); window.removeEventListener("resize", onResize); renderer.dispose(); if(el.contains(renderer.domElement)) el.removeChild(renderer.domElement); };
-  }, []);
+    const onResize=()=>{camera.aspect=el.clientWidth/el.clientHeight;camera.updateProjectionMatrix();renderer.setSize(el.clientWidth,el.clientHeight);};
+    window.addEventListener("resize",onResize);
+    return()=>{cancelAnimationFrame(frameRef.current);window.removeEventListener("resize",onResize);renderer.dispose();if(el.contains(renderer.domElement))el.removeChild(renderer.domElement);};
+  },[]);
 
-  /* ── Orbit + pan controls ────────────────────────────── */
-  useEffect(() => {
-    const el = containerRef.current; if (!el) return;
-    function updateCam() {
-      const o = orbitRef.current, cam = cameraRef.current; if(!cam) return;
-      cam.position.set(
-        o.target.x + o.dist*Math.sin(o.phi)*Math.cos(o.theta),
-        o.target.y + o.dist*Math.cos(o.phi),
-        o.target.z + o.dist*Math.sin(o.phi)*Math.sin(o.theta)
-      );
+  /* ── Orbit controls ──────────────────────────────────── */
+  useEffect(()=>{
+    const el=containerRef.current;if(!el)return;
+    function updateCam(){
+      const o=orbitRef.current,cam=cameraRef.current;if(!cam)return;
+      cam.position.set(o.target.x+o.dist*Math.sin(o.phi)*Math.cos(o.theta),o.target.y+o.dist*Math.cos(o.phi),o.target.z+o.dist*Math.sin(o.phi)*Math.sin(o.theta));
       cam.lookAt(o.target);
     }
-    const onDown = e => {
-      if (e.button === 2 || e.shiftKey) { orbitRef.current.panning=true; }
-      else { orbitRef.current.dragging=true; }
-      orbitRef.current.lastX=e.clientX; orbitRef.current.lastY=e.clientY;
+    const onDown=e=>{
+      if(e.button===2||e.shiftKey)orbitRef.current.panning=true;
+      else orbitRef.current.dragging=true;
+      orbitRef.current.lastX=e.clientX;orbitRef.current.lastY=e.clientY;
     };
-    const onMove = e => {
+    const onMove=e=>{
       const o=orbitRef.current;
-      const dx = e.clientX-o.lastX, dy = e.clientY-o.lastY;
-      if (o.dragging) {
-        o.theta-=dx*0.005;
-        o.phi=Math.max(0.1,Math.min(Math.PI-0.1,o.phi-dy*0.005));
-      } else if (o.panning) {
-        const cam = cameraRef.current; if(!cam) return;
-        const right = new THREE.Vector3(); cam.getWorldDirection(right);
-        const up = new THREE.Vector3(0,1,0);
-        right.cross(up).normalize();
-        const panSpeed = o.dist * 0.002;
-        o.target.add(right.multiplyScalar(-dx * panSpeed));
-        o.target.y += dy * panSpeed;
+      const dx=e.clientX-o.lastX,dy=e.clientY-o.lastY;
+      if(o.dragging){
+        o.theta-=dx*.005;o.phi=Math.max(.1,Math.min(Math.PI-.1,o.phi-dy*.005));
+      }else if(o.panning){
+        const cam=cameraRef.current;if(!cam)return;
+        const fwd=new THREE.Vector3();cam.getWorldDirection(fwd);
+        const right=new THREE.Vector3().crossVectors(fwd,cam.up).normalize();
+        const up=new THREE.Vector3().crossVectors(right,fwd).normalize();
+        const ps=o.dist*.001;
+        o.target.add(right.multiplyScalar(-dx*ps));
+        o.target.add(up.multiplyScalar(dy*ps));
       }
-      o.lastX=e.clientX; o.lastY=e.clientY;
-      if (o.dragging || o.panning) updateCam();
+      o.lastX=e.clientX;o.lastY=e.clientY;
+      if(o.dragging||o.panning)updateCam();
     };
-    const onUp = () => { orbitRef.current.dragging=false; orbitRef.current.panning=false; };
-    const onWheel = e => { e.preventDefault(); orbitRef.current.dist=Math.max(0.05,Math.min(50,orbitRef.current.dist*Math.pow(1.001,e.deltaY))); updateCam(); };
-    const onCtx = e => e.preventDefault();
-    el.addEventListener("mousedown", onDown); window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp); el.addEventListener("wheel", onWheel, {passive:false});
-    el.addEventListener("contextmenu", onCtx);
-    return () => { el.removeEventListener("mousedown", onDown); window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); el.removeEventListener("wheel", onWheel); el.removeEventListener("contextmenu", onCtx); };
-  }, []);
+    const onUp=()=>{orbitRef.current.dragging=false;orbitRef.current.panning=false;};
+    const onWheel=e=>{
+      e.preventDefault();
+      const factor=e.deltaY>0?1.08:1/1.08;
+      orbitRef.current.dist=Math.max(.01,Math.min(50,orbitRef.current.dist*factor));
+      updateCam();
+    };
+    const onCtx=e=>e.preventDefault();
+    el.addEventListener("mousedown",onDown);window.addEventListener("mousemove",onMove);
+    window.addEventListener("mouseup",onUp);el.addEventListener("wheel",onWheel,{passive:false});
+    el.addEventListener("contextmenu",onCtx);
+    return()=>{el.removeEventListener("mousedown",onDown);window.removeEventListener("mousemove",onMove);window.removeEventListener("mouseup",onUp);el.removeEventListener("wheel",onWheel);el.removeEventListener("contextmenu",onCtx);};
+  },[]);
 
-  /* ── Scale markers ───────────────────────────────────── */
-  useEffect(() => {
-    const sg = scaleGroupRef.current; if (!sg) return;
-    while (sg.children.length) { const c=sg.children[0]; c.geometry?.dispose(); c.material?.dispose(); sg.remove(c); }
-    if (showScales) {
-      const markers = buildScaleMarkers(3);
-      markers.children.forEach(c => sg.add(c.clone()));
-    }
-    sg.visible = showScales;
-  }, [showScales]);
+  /* ── Scale visibility ────────────────────────────────── */
+  useEffect(()=>{if(scaleGroupRef.current)scaleGroupRef.current.visible=showScales;},[showScales]);
 
-  /* ── Update coil meshes ──────────────────────────────── */
-  useEffect(() => {
-    const cg = coilGroupRef.current; if (!cg) return;
-    while (cg.children.length) {
-      const c=cg.children[0];
-      if (c.geometry) c.geometry.dispose();
-      if (c.material) c.material.dispose();
-      cg.remove(c);
-    }
-
-    coils.forEach((coil, i) => {
-      try {
-        const meshes = buildCoilMeshes(coil, COLORS[i%COLORS.length], coil.id===selectedId, visualScale, showIndividual);
-        meshes.forEach(m => cg.add(m));
-      } catch(e) { console.warn("Mesh error:", coil.name, e); }
+  /* ── Update meshes ───────────────────────────────────── */
+  useEffect(()=>{
+    const cg=coilGroupRef.current;if(!cg)return;
+    while(cg.children.length){const c=cg.children[0];if(c.geometry)c.geometry.dispose();if(c.material)c.material.dispose();cg.remove(c);}
+    coils.forEach((coil,i)=>{
+      try{
+        const sel=coil.id===selectedId||multiSel.has(coil.id);
+        buildCoilMeshes(coil,COLORS[i%COLORS.length],sel,showIndiv).forEach(m=>cg.add(m));
+      }catch(e){console.warn(e);}
     });
+    // Ghosts
+    const tk=new Map();
+    coils.filter(c=>c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding").forEach(c=>{
+      const k=`${c.type}_${c.majorRadius}_${c.minorRadius}_${c.extension||0}_${c.center}_${c.normal}`;
+      if(!tk.has(k))tk.set(k,c);
+    });
+    tk.forEach(c=>{
+      try{
+        if(c.type==="elongated_toroidal_winding"&&c.extension>0)cg.add(ghostElongTorus(c.majorRadius,c.minorRadius,c.extension,c.center,c.normal));
+        else cg.add(ghostTorus(c.majorRadius,c.minorRadius,c.center,c.normal));
+      }catch(e){console.warn(e);}
+    });
+  },[coils,selectedId,multiSel,showIndiv]);
 
-    // Ghost surfaces
-    const torusKeys = new Map();
-    coils.filter(c => c.type === "toroidal_winding" || c.type === "elongated_toroidal_winding").forEach(c => {
-      const key = `${c.type}_${c.majorRadius}_${c.minorRadius}_${c.extension||0}_${c.center.join(",")}_${c.normal.join(",")}`;
-      if (!torusKeys.has(key)) torusKeys.set(key, c);
+  /* ── Fit view ────────────────────────────────────────── */
+  const fitView=useCallback(()=>{
+    if(coils.length===0)return;
+    const box=new THREE.Box3();
+    coils.forEach(c=>{
+      const path=fullPath(c);
+      path.forEach(p=>box.expandByPoint(p));
     });
-    torusKeys.forEach(c => {
-      try {
-        if (c.type === "elongated_toroidal_winding" && c.extension > 0) {
-          cg.add(buildGhostElongatedTorus(c.majorRadius, c.minorRadius, c.extension, c.center, c.normal));
-        } else {
-          cg.add(buildGhostTorus(c.majorRadius, c.minorRadius, c.center, c.normal));
-        }
-      } catch(e) { console.warn("Ghost error:", e); }
-    });
-  }, [coils, selectedId, visualScale, showIndividual]);
+    const center=new THREE.Vector3();box.getCenter(center);
+    const size=box.getSize(new THREE.Vector3()).length();
+    const o=orbitRef.current;
+    o.target.copy(center);
+    o.dist=Math.max(size*1.2,.1);
+    const cam=cameraRef.current;if(!cam)return;
+    cam.position.set(o.target.x+o.dist*Math.sin(o.phi)*Math.cos(o.theta),o.target.y+o.dist*Math.cos(o.phi),o.target.z+o.dist*Math.sin(o.phi)*Math.sin(o.theta));
+    cam.lookAt(o.target);
+  },[coils]);
 
   /* ── Handlers ────────────────────────────────────────── */
-  const addCoil = () => { const c=defaultCoil(); setCoils(p=>[...p,c]); setSelectedId(c.id); };
-  const updateCoil = u => setCoils(p => p.map(c => c.id===u.id ? u : c));
-  const deleteCoil = id => { setCoils(p => p.filter(c => c.id!==id)); if(selectedId===id) setSelectedId(null); };
+  const addCoil=()=>{const c=defaultCoil();pushCoils([...coils,c]);setSelectedId(c.id);};
+  const updateCoil=u=>pushCoils(coils.map(c=>c.id===u.id?u:c));
+  const deleteCoil=id=>{pushCoils(coils.filter(c=>c.id!==id));if(selectedId===id)setSelectedId(null);setMultiSel(s=>{const n=new Set(s);n.delete(id);return n;});};
+  const duplicateCoil=id=>{
+    const src=coils.find(c=>c.id===id);if(!src)return;
+    const dup=defaultCoil({...src,name:src.name+" copy"});
+    pushCoils([...coils,dup]);setSelectedId(dup.id);
+  };
+  const shiftSelect=id=>{setMultiSel(s=>{const n=new Set(s);if(n.has(id))n.delete(id);else n.add(id);return n;});};
 
-  const handleParse = async () => {
-    if (!prompt.trim()) return;
-    setLoading(true); setError(null);
-    try {
-      const parsed = await parseWithClaude(prompt);
-      if (!Array.isArray(parsed)) throw new Error("Expected JSON array");
-      const nc = parsed.map(p => defaultCoil(p));
-      setCoils(nc); setSelectedId(nc[0]?.id || null);
-    } catch (e) { setError("Parse failed: " + e.message); }
-    finally { setLoading(false); }
+  const applyUniversal=(vals,fields)=>{
+    const targets=multiSel.size>0?coils.filter(c=>multiSel.has(c.id)||c.id===selectedId):coils;
+    const ids=new Set(targets.map(c=>c.id));
+    pushCoils(coils.map(c=>{
+      if(!ids.has(c.id))return c;
+      const u={...c};
+      if(fields.turns)u.turns=vals.turns;
+      if(fields.current)u.current=vals.current;
+      if(fields.wireGauge)u.wireGauge=vals.wireGauge;
+      if(fields.channelWidth)u.channelWidth=vals.channelWidth;
+      return u;
+    }));
   };
 
-  const exportConfig = () => {
-    const cfg = coils.map(({id, ...r}) => r);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(new Blob([JSON.stringify(cfg,null,2)], {type:"application/json"}));
-    a.download = "coil_config.json"; a.click();
+  const handleParse=async()=>{
+    if(!prompt.trim())return;
+    setLoading(true);setError(null);
+    try{
+      const parsed=await parseWithClaude(prompt);
+      if(!Array.isArray(parsed))throw new Error("Expected JSON array");
+      const nc=parsed.map(p=>defaultCoil(p));
+      pushCoils(nc);setSelectedId(nc[0]?.id||null);setMultiSel(new Set());
+    }catch(e){setError("Parse failed: "+e.message);}
+    finally{setLoading(false);}
   };
 
-  return (
+  const exportConfig=()=>{
+    const cfg=coils.map(({id,...r})=>r);
+    const a=document.createElement("a");
+    a.href=URL.createObjectURL(new Blob([JSON.stringify(cfg,null,2)],{type:"application/json"}));
+    a.download="coil_config.json";a.click();
+  };
+
+  return(
     <div className="flex flex-col h-screen bg-gray-950 text-gray-200 overflow-hidden">
-      <div className="flex items-center gap-2 px-4 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
-        <input value={prompt} onChange={e => setPrompt(e.target.value)}
-          onKeyDown={e => e.key==="Enter" && !e.shiftKey && handleParse()}
+      {/* Top bar */}
+      <div className="flex items-center gap-2 px-4 py-2 bg-gray-900 border-b border-gray-800 shrink-0">
+        <input value={prompt} onChange={e=>setPrompt(e.target.value)}
+          onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&handleParse()}
           placeholder="Describe your coil geometry in plain English..."
-          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-blue-500" />
-        <button onClick={handleParse} disabled={loading || !prompt.trim()}
+          className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-4 py-2 text-sm text-gray-200 placeholder-gray-500 outline-none focus:border-blue-500"/>
+        <button onClick={handleParse} disabled={loading||!prompt.trim()}
           className="px-4 py-2 bg-blue-600 hover:bg-blue-500 disabled:bg-gray-700 disabled:text-gray-500 text-white text-sm font-medium rounded-lg shrink-0">
-          {loading ? "Parsing..." : "Parse with Claude"}
+          {loading?"Parsing...":"Parse with Claude"}
         </button>
       </div>
-      {error && <div className="px-4 py-2 bg-red-900/30 border-b border-red-800 text-red-300 text-xs">{error}</div>}
+      {error&&<div className="px-4 py-1.5 bg-red-900/30 border-b border-red-800 text-red-300 text-xs">{error}</div>}
+
       <div className="flex flex-1 overflow-hidden">
+        {/* Left panel */}
         <div className="w-72 bg-gray-900/50 border-r border-gray-800 flex flex-col overflow-hidden shrink-0">
           <div className="flex items-center justify-between px-3 py-2 border-b border-gray-800">
             <span className="text-sm font-medium text-gray-300">Coils ({coils.length})</span>
-            <div className="flex gap-1.5">
-              <button onClick={addCoil} className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded">+ Add</button>
-              {coils.length > 0 && <button onClick={exportConfig} className="px-2.5 py-1 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded">Export</button>}
+            <div className="flex gap-1">
+              <button onClick={addCoil} className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded">+ Add</button>
+              <button onClick={fitView} className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded">Fit</button>
+              {coils.length>0&&<button onClick={exportConfig} className="px-2 py-0.5 bg-gray-800 hover:bg-gray-700 text-xs text-gray-300 rounded">Export</button>}
             </div>
           </div>
           <div className="flex-1 overflow-y-auto p-2">
-            {coils.length === 0 && <div className="text-center text-gray-600 text-xs mt-8 px-4 leading-relaxed">Describe coils above, or click + Add.</div>}
-            {coils.map((c, i) => <CoilCard key={c.id} coil={c} index={i} selected={c.id===selectedId} onSelect={setSelectedId} onUpdate={updateCoil} onDelete={deleteCoil} />)}
+            {coils.length===0&&<div className="text-center text-gray-600 text-xs mt-8 px-4 leading-relaxed">Describe coils above, or click + Add.</div>}
+            {coils.map((c,i)=><CoilCard key={c.id} coil={c} index={i}
+              selected={c.id===selectedId} multiSelected={multiSel.has(c.id)}
+              onSelect={id=>{setSelectedId(id);setMultiSel(new Set());}}
+              onShiftSelect={shiftSelect} onUpdate={updateCoil}
+              onDelete={deleteCoil} onDuplicate={duplicateCoil}/>)}
           </div>
-          <SettingsPanel showScales={showScales} setShowScales={setShowScales}
-            showIndividual={showIndividual} setShowIndividual={setShowIndividual}
-            visualScale={visualScale} setVisualScale={setVisualScale} />
+
+          {/* Display toggles */}
+          <div className="border-t border-gray-800 px-3 py-2 bg-gray-900/30 flex flex-col gap-1">
+            <span className="text-xs text-gray-400 font-medium">Display</span>
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+              <input type="checkbox" checked={showScales} onChange={e=>setShowScales(e.target.checked)} className="rounded border-gray-600"/>
+              Axis scales (cm)
+            </label>
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+              <input type="checkbox" checked={showIndiv} onChange={e=>setShowIndiv(e.target.checked)} className="rounded border-gray-600"/>
+              Individual turns (slow if many)
+            </label>
+          </div>
+
+          <UniversalPanel onApply={applyUniversal}/>
+          <SaveLoadPanel coils={coils} onLoad={(nc)=>{pushCoils(nc);setSelectedId(nc[0]?.id||null);}}/>
         </div>
+
+        {/* 3D viewer */}
         <div className="flex-1 relative">
-          <div ref={containerRef} className="absolute inset-0" />
+          <div ref={containerRef} className="absolute inset-0"/>
+          <InfoBox coils={coils} show={showStats} setShow={setShowStats}/>
           <div className="absolute bottom-3 left-3 text-xs text-gray-600 pointer-events-none select-none">
-            Drag: rotate · Shift+drag: pan · Scroll: zoom
+            Drag: rotate · Shift+drag: pan · Scroll: zoom · Cmd+Z/Cmd+Shift+Z: undo/redo
           </div>
           <div className="absolute top-3 right-3 text-xs text-gray-600 pointer-events-none select-none bg-gray-900/60 rounded px-2 py-1">
-            <span className="text-red-400">X</span> <span className="text-green-400">Y</span>(up) <span className="text-blue-400">Z</span>
+            <span className="text-red-400">X</span> <span className="text-green-400">Y</span>(up) <span className="text-blue-400">Z</span> · cm
           </div>
         </div>
       </div>

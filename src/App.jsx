@@ -46,7 +46,7 @@ function calcPacking(c) {
 }
 
 /* ══════════════════════════════════════════════════════════════
-   STADIUM GEOMETRY (for elongated toroid cross-section)
+   STADIUM GEOMETRY
    ══════════════════════════════════════════════════════════════ */
 
 function stadiumPerim(r, d) { return 2*Math.PI*r + 2*d; }
@@ -100,9 +100,7 @@ function orient(pts, c) {
 
 function fullPath(c) { return orient(basePath(c),c); }
 
-/* ══════════════════════════════════════════════════════════════
-   INDIVIDUAL TURN PATHS
-   ══════════════════════════════════════════════════════════════ */
+/* ── Individual turn paths ────────────────────────────────── */
 
 function turnPaths(coil) {
   const {wd,tpl,layers}=calcPacking(coil);
@@ -198,41 +196,73 @@ function ghostElongTorus(R,r,ext,center,normal){
   return mesh;
 }
 
-/* ── Scale markers (cm, every 5cm) ────────────────────────── */
+/* ── Scale markers (3D meshes, not sprites — scale with zoom) */
 
-function buildScales(maxCm){
-  const g=new THREE.Group();
-  const axes=[{d:new THREE.Vector3(1,0,0),c:"#ef4444"},{d:new THREE.Vector3(0,1,0),c:"#22c55e"},{d:new THREE.Vector3(0,0,1),c:"#3b82f6"}];
-  axes.forEach(({d,c})=>{
-    for(let cm=-maxCm;cm<=maxCm;cm+=5){
-      if(cm===0)continue;
-      const pos=d.clone().multiplyScalar(cm/100);
-      const sg=new THREE.SphereGeometry(.005,6,6);
-      const sm=new THREE.MeshBasicMaterial({color:new THREE.Color(c),transparent:true,opacity:.5});
-      const tick=new THREE.Mesh(sg,sm);tick.position.copy(pos);g.add(tick);
-      const cv=document.createElement("canvas");cv.width=96;cv.height=32;
-      const ctx=cv.getContext("2d");ctx.fillStyle=c;ctx.font="bold 22px monospace";
-      ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(cm+"cm",48,16);
-      const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false,transparent:true,opacity:.6}));
-      sp.position.copy(pos).add(new THREE.Vector3(0,.03,0));sp.scale.set(.1,.035,.1);g.add(sp);
+function buildScales(maxCm) {
+  const g = new THREE.Group();
+  const axes = [
+    {d:[1,0,0], c:"#ef4444", up:[0,0.008,0]},
+    {d:[0,1,0], c:"#22c55e", up:[0.008,0,0]},
+    {d:[0,0,1], c:"#3b82f6", up:[0,0.008,0]}
+  ];
+  axes.forEach(({d,c,up}) => {
+    for (let cm = -maxCm; cm <= maxCm; cm += 5) {
+      if (cm === 0) continue;
+      const pos = new THREE.Vector3(d[0]*cm/100, d[1]*cm/100, d[2]*cm/100);
+
+      // Small tick sphere
+      const sg = new THREE.SphereGeometry(0.002, 4, 4);
+      const sm = new THREE.MeshBasicMaterial({color:new THREE.Color(c), transparent:true, opacity:0.4});
+      const tick = new THREE.Mesh(sg, sm);
+      tick.position.copy(pos);
+      g.add(tick);
+
+      // Thin line from axis
+      const lineMat = new THREE.LineBasicMaterial({color:new THREE.Color(c), transparent:true, opacity:0.15});
+      const lineGeo = new THREE.BufferGeometry().setFromPoints([
+        pos.clone().sub(new THREE.Vector3(up[0]*0.5,up[1]*0.5,up[2]*0.5)),
+        pos.clone().add(new THREE.Vector3(up[0]*0.5,up[1]*0.5,up[2]*0.5))
+      ]);
+      g.add(new THREE.Line(lineGeo, lineMat));
+
+      // Label as small 3D plane (scales with distance, not fixed screen size)
+      const cv = document.createElement("canvas");
+      cv.width = 64; cv.height = 24;
+      const ctx = cv.getContext("2d");
+      ctx.fillStyle = c;
+      ctx.font = "bold 16px monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(cm + "", 32, 12);
+      const tex = new THREE.CanvasTexture(cv);
+      tex.minFilter = THREE.LinearFilter;
+      const planeMat = new THREE.MeshBasicMaterial({map:tex, transparent:true, opacity:0.5, side:THREE.DoubleSide, depthTest:false});
+      const planeGeo = new THREE.PlaneGeometry(0.025, 0.01);
+      const label = new THREE.Mesh(planeGeo, planeMat);
+      label.position.copy(pos).add(new THREE.Vector3(up[0]*1.5, up[1]*1.5, up[2]*1.5));
+      // Face the label outward from the axis
+      if (d[0]) label.rotation.y = Math.PI / 2;
+      if (d[2]) { /* default facing is fine */ }
+      if (d[1]) label.rotation.x = -Math.PI / 2;
+      g.add(label);
     }
   });
   return g;
 }
 
-function makeLabel(text,pos,color){
-  const cv=document.createElement("canvas");cv.width=64;cv.height=64;
-  const ctx=cv.getContext("2d");ctx.fillStyle=color;ctx.font="bold 48px monospace";
-  ctx.textAlign="center";ctx.textBaseline="middle";ctx.fillText(text,32,32);
-  const s=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false}));
-  s.position.copy(pos);s.scale.set(.15,.15,.15);return s;
+function makeLabel(text, pos, color) {
+  const cv = document.createElement("canvas"); cv.width=64; cv.height=64;
+  const ctx = cv.getContext("2d"); ctx.fillStyle=color; ctx.font="bold 48px monospace";
+  ctx.textAlign="center"; ctx.textBaseline="middle"; ctx.fillText(text,32,32);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv),depthTest:false}));
+  s.position.copy(pos); s.scale.set(.08,.08,.08); return s;
 }
 
 /* ══════════════════════════════════════════════════════════════
-   PHYSICS CALCULATIONS
+   PHYSICS — B-FIELD
    ══════════════════════════════════════════════════════════════ */
 
-function coilCircumference(c){
+function coilCircumference(c) {
   if(c.type==="circular") return 2*Math.PI*c.radius;
   if(c.type==="racetrack") return 2*c.straightLength+2*Math.PI*c.arcRadius;
   if(c.type==="elliptical"){const a=c.semiMajor,b=c.semiMinor,h=((a-b)/(a+b))**2;return Math.PI*(a+b)*(1+3*h/(10+Math.sqrt(4-3*h)));}
@@ -244,75 +274,151 @@ function coilCircumference(c){
   return 0;
 }
 
-function calcStats(coils){
-  let totalLen=0, totalPower=0, totalMass=0;
+function calcStats(coils) {
+  let totalLen=0,totalPower=0,totalMass=0;
   coils.forEach(c=>{
     const L=coilCircumference(c)*c.turns;
     const A=Math.PI*(wireDiam(c.wireGauge)/2)**2;
     const R=CU_RHO*L/A;
-    totalLen+=L;
-    totalPower+=c.current**2*R;
-    totalMass+=L*A*CU_DENSITY;
+    totalLen+=L;totalPower+=c.current**2*R;totalMass+=L*A*CU_DENSITY;
   });
   return {totalLen,totalPower,totalMass};
 }
 
-function estimateB(coils,pt){
-  let Bx=0,By=0,Bz=0;
-  coils.forEach(c=>{
-    let R,cen,norm,NI;
-    const isTor=c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding";
-    if(isTor){
-      const mr=c.majorRadius,rr=c.minorRadius,d=c.type==="elongated_toroidal_winding"?(c.extension||0):0;
-      const{dr,dh}=stadiumPt(c.windingIndex/c.totalWindings,rr,d);
-      R=mr+dr;
-      cen=new THREE.Vector3(0,dh,0);
-      norm=new THREE.Vector3(0,1,0);
-      const n2=new THREE.Vector3(...c.normal).normalize();
-      const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n2);
-      cen.applyQuaternion(q).add(new THREE.Vector3(...c.center));
-      norm.applyQuaternion(q);
-    } else if(c.type==="circular"){
-      R=c.radius;cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
-    } else if(c.type==="racetrack"){
-      R=Math.sqrt((c.straightLength*2*c.arcRadius+Math.PI*c.arcRadius**2)/Math.PI);
-      cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
-    } else if(c.type==="elliptical"){
-      R=Math.sqrt(c.semiMajor*c.semiMinor);
-      cen=new THREE.Vector3(...c.center);norm=new THREE.Vector3(...c.normal).normalize();
-    } else return;
-    NI=c.turns*c.current;
-    const rv=pt.clone().sub(cen);
-    const dist=rv.length();
-    if(dist<1e-10){
-      const Bm=MU0*NI/(2*R);
-      Bx+=Bm*norm.x;By+=Bm*norm.y;Bz+=Bm*norm.z;return;
-    }
-    const z=rv.dot(norm);
-    const rPerp=rv.clone().sub(norm.clone().multiplyScalar(z));
-    const rho=rPerp.length();
-    if(rho<.01*R){
-      const Bm=MU0*NI*R*R/(2*Math.pow(R*R+z*z,1.5));
-      Bx+=Bm*norm.x;By+=Bm*norm.y;Bz+=Bm*norm.z;
-    } else {
-      const m=NI*Math.PI*R*R;
-      const mV=norm.clone().multiplyScalar(m);
-      const rH=rv.clone().normalize();
-      const md=mV.dot(rH);
-      const co=MU0/(4*Math.PI*dist**3);
-      Bx+=co*(3*md*rH.x-mV.x);By+=co*(3*md*rH.y-mV.y);Bz+=co*(3*md*rH.z-mV.z);
-    }
-  });
-  const mag=Math.sqrt(Bx*Bx+By*By+Bz*Bz);
-  return {Bx,By,Bz,mag};
+function getCoilParams(c) {
+  const isTor = c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding";
+  let R, cen, norm;
+  if (isTor) {
+    const mr=c.majorRadius, rr=c.minorRadius, d=c.type==="elongated_toroidal_winding"?(c.extension||0):0;
+    const {dr,dh}=stadiumPt(c.windingIndex/c.totalWindings,rr,d);
+    R=mr+dr;
+    cen=new THREE.Vector3(0,dh,0);
+    norm=new THREE.Vector3(0,1,0);
+    const n2=new THREE.Vector3(...c.normal).normalize();
+    const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),n2);
+    cen.applyQuaternion(q).add(new THREE.Vector3(...c.center));
+    norm.applyQuaternion(q);
+  } else if (c.type==="circular") {
+    R=c.radius; cen=new THREE.Vector3(...c.center); norm=new THREE.Vector3(...c.normal).normalize();
+  } else if (c.type==="racetrack") {
+    R=Math.sqrt((c.straightLength*2*c.arcRadius+Math.PI*c.arcRadius**2)/Math.PI);
+    cen=new THREE.Vector3(...c.center); norm=new THREE.Vector3(...c.normal).normalize();
+  } else if (c.type==="elliptical") {
+    R=Math.sqrt(c.semiMajor*c.semiMinor);
+    cen=new THREE.Vector3(...c.center); norm=new THREE.Vector3(...c.normal).normalize();
+  } else {
+    return null;
+  }
+  return { R, cen, norm, NI: c.turns * c.current };
 }
 
-function fmtB(v){
+function estimateB(coils, pt) {
+  let Bx=0, By=0, Bz=0;
+  coils.forEach(c => {
+    const p = getCoilParams(c);
+    if (!p) return;
+    const {R, cen, norm, NI} = p;
+    const rv = pt.clone().sub(cen);
+    const dist = rv.length();
+    if (dist < 1e-10) {
+      const Bm = MU0*NI/(2*R);
+      Bx+=Bm*norm.x; By+=Bm*norm.y; Bz+=Bm*norm.z; return;
+    }
+    const z = rv.dot(norm);
+    const rPerp = rv.clone().sub(norm.clone().multiplyScalar(z));
+    const rho = rPerp.length();
+    if (rho < 0.01*R) {
+      const Bm = MU0*NI*R*R/(2*Math.pow(R*R+z*z,1.5));
+      Bx+=Bm*norm.x; By+=Bm*norm.y; Bz+=Bm*norm.z;
+    } else {
+      const m = NI*Math.PI*R*R;
+      const mV = norm.clone().multiplyScalar(m);
+      const rH = rv.clone().normalize();
+      const md = mV.dot(rH);
+      const co = MU0/(4*Math.PI*dist**3);
+      Bx+=co*(3*md*rH.x-mV.x); By+=co*(3*md*rH.y-mV.y); Bz+=co*(3*md*rH.z-mV.z);
+    }
+  });
+  return new THREE.Vector3(Bx, By, Bz);
+}
+
+function fmtB(v) {
   if(v<1e-9) return (v*1e12).toFixed(2)+" pT";
   if(v<1e-6) return (v*1e9).toFixed(2)+" nT";
   if(v<1e-3) return (v*1e6).toFixed(2)+" µT";
   if(v<1) return (v*1e3).toFixed(2)+" mT";
   return v.toFixed(4)+" T";
+}
+
+/* ══════════════════════════════════════════════════════════════
+   FIELD LINES
+   ══════════════════════════════════════════════════════════════ */
+
+function traceFieldLine(coils, start, steps, ds) {
+  const pts = [start.clone()];
+  const p = start.clone();
+  for (let i = 0; i < steps; i++) {
+    const B = estimateB(coils, p);
+    const mag = B.length();
+    if (mag < 1e-15) break;
+    B.normalize().multiplyScalar(ds);
+    p.add(B);
+    if (p.length() > 2) break; // stop if too far from origin
+    pts.push(p.clone());
+  }
+  return pts;
+}
+
+function generateFieldLines(coils, density) {
+  const lines = [];
+  if (coils.length === 0) return lines;
+
+  // Seed points: rings around origin in XZ plane at various heights
+  const seedDists = [0.02, 0.05, 0.1, 0.15, 0.25];
+  const heights = [-0.15, -0.08, 0, 0.08, 0.15];
+  const nAround = Math.max(4, density);
+  const ds = 0.005;
+  const steps = 400;
+
+  heights.forEach(y => {
+    seedDists.forEach(r => {
+      for (let i = 0; i < nAround; i++) {
+        const theta = (i / nAround) * 2 * Math.PI;
+        const seed = new THREE.Vector3(r * Math.cos(theta), y, r * Math.sin(theta));
+        // Trace forward
+        const fwd = traceFieldLine(coils, seed, steps, ds);
+        if (fwd.length > 3) lines.push(fwd);
+        // Trace backward
+        const bwd = traceFieldLine(coils, seed, steps, -ds);
+        if (bwd.length > 3) lines.push(bwd);
+      }
+    });
+  });
+  return lines;
+}
+
+function buildFieldLineMeshes(fieldLines) {
+  const group = new THREE.Group();
+  // Color map: blue (weak) -> cyan -> green -> yellow -> red (strong)
+  fieldLines.forEach(pts => {
+    const positions = [];
+    const colors = [];
+    pts.forEach((p, i) => {
+      positions.push(p.x, p.y, p.z);
+      // Color by position along line (proxy for field evolution)
+      const t = i / pts.length;
+      const r = t < 0.5 ? t * 2 : 1;
+      const gv = t < 0.5 ? 1 : 2 - t * 2;
+      const b = t < 0.5 ? 1 - t * 2 : 0;
+      colors.push(r * 0.8, gv * 0.8, b * 0.8);
+    });
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute("color", new THREE.Float32BufferAttribute(colors, 3));
+    const mat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.5, linewidth: 1 });
+    group.add(new THREE.Line(geo, mat));
+  });
+  return group;
 }
 
 /* ══════════════════════════════════════════════════════════════
@@ -329,7 +435,7 @@ COIL TYPES:
 3. "elliptical" — planar elliptical loop.
 4. "toroidal_winding" — wire on torus surface, toroidal direction, fixed poloidal angle. N windings = N coils with windingIndex 0..N-1.
    majorRadius=(innerRadius+outerRadius)/2, minorRadius=(outerRadius-innerRadius)/2.
-5. "elongated_toroidal_winding" — same but cross-section is stadium (semicircles + straight walls). extension = straight wall length (separation distance).
+5. "elongated_toroidal_winding" — same but cross-section is stadium (semicircles + straight walls). extension = straight wall length.
 
 Each coil MUST have ALL fields:
 {"type":"...","name":"...","center":[x,y,z],"normal":[nx,ny,nz],"radius":0.5,"semiMajor":0.5,"semiMinor":0.3,"straightLength":0.6,"arcRadius":0.3,"majorRadius":0.1,"minorRadius":0.05,"extension":0.0,"windingIndex":0,"totalWindings":12,"turns":100,"current":10.0,"wireGauge":14,"channelWidth":0.01}
@@ -454,15 +560,14 @@ function UniversalPanel({onApply}){
 
 function InfoBox({coils,show,setShow}){
   if(!show||coils.length===0) return(
-    <button onClick={()=>setShow(true)} className="absolute bottom-3 right-3 px-2 py-1 bg-gray-800/80 text-gray-400 text-xs rounded hover:bg-gray-700 z-10">
-      Stats
-    </button>
+    <button onClick={()=>setShow(true)} className="absolute bottom-3 right-3 px-2 py-1 bg-gray-800/80 text-gray-400 text-xs rounded hover:bg-gray-700 z-10">Stats</button>
   );
   const stats=calcStats(coils);
   const bOrigin=estimateB(coils,new THREE.Vector3(0,0,0));
   const b30=estimateB(coils,new THREE.Vector3(0.3,0,0));
+  const bOmag=bOrigin.length(), b3mag=b30.length();
   return(
-    <div className="absolute bottom-3 right-3 bg-gray-900/95 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 z-10 min-w-56">
+    <div className="absolute bottom-3 right-3 bg-gray-900/95 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 z-10 min-w-56 max-w-72">
       <div className="flex justify-between items-center mb-2">
         <span className="font-medium text-gray-200">Configuration Stats</span>
         <button onClick={()=>setShow(false)} className="text-gray-500 hover:text-gray-300">✕</button>
@@ -472,11 +577,11 @@ function InfoBox({coils,show,setShow}){
         <div>Copper mass: <span className="text-gray-100">{stats.totalMass<1?(stats.totalMass*1000).toFixed(1)+" g":stats.totalMass.toFixed(3)+" kg"}</span></div>
         <div>Power (I²R): <span className="text-gray-100">{stats.totalPower<1?(stats.totalPower*1000).toFixed(2)+" mW":stats.totalPower.toFixed(3)+" W"}</span></div>
         <div className="border-t border-gray-800 pt-1 mt-1"/>
-        <div>|B| at origin: <span className="text-yellow-300">{fmtB(bOrigin.mag)}</span></div>
-        <div className="text-gray-500 ml-2">({fmtB(Math.abs(bOrigin.Bx))} x, {fmtB(Math.abs(bOrigin.By))} y, {fmtB(Math.abs(bOrigin.Bz))} z)</div>
-        <div>|B| at 30cm radial: <span className="text-yellow-300">{fmtB(b30.mag)}</span></div>
-        <div className="text-gray-500 ml-2">({fmtB(Math.abs(b30.Bx))} x, {fmtB(Math.abs(b30.By))} y, {fmtB(Math.abs(b30.Bz))} z)</div>
-        <div className="text-gray-600 mt-1 italic">B estimates use dipole/on-axis approx.</div>
+        <div>|B| at origin: <span className="text-yellow-300">{fmtB(bOmag)}</span></div>
+        <div className="text-gray-500 ml-2">({fmtB(Math.abs(bOrigin.x))}, {fmtB(Math.abs(bOrigin.y))}, {fmtB(Math.abs(bOrigin.z))})</div>
+        <div>|B| at 30cm: <span className="text-yellow-300">{fmtB(b3mag)}</span></div>
+        <div className="text-gray-500 ml-2">({fmtB(Math.abs(b30.x))}, {fmtB(Math.abs(b30.y))}, {fmtB(Math.abs(b30.z))})</div>
+        <div className="text-gray-600 mt-1 italic">Dipole/on-axis approx.</div>
       </div>
     </div>
   );
@@ -487,12 +592,12 @@ function InfoBox({coils,show,setShow}){
 function SaveLoadPanel({coils,onLoad}){
   const[name,setName]=useState("");
   const[open,setOpen]=useState(false);
-  const getSaved=()=>{try{return JSON.parse(localStorage.getItem("coilConfigs")||"{}");}catch{return {};}};
-  const save=()=>{if(!name.trim())return;const s=getSaved();s[name.trim()]=coils.map(({id,...r})=>r);localStorage.setItem("coilConfigs",JSON.stringify(s));setName("");};
+  const[,refresh]=useState(0);
+  const getSaved=()=>{try{return JSON.parse(localStorage.getItem("coilConfigs")||"{}");}catch{return{};}};
+  const save=()=>{if(!name.trim())return;const s=getSaved();s[name.trim()]=coils.map(({id,...r})=>r);localStorage.setItem("coilConfigs",JSON.stringify(s));setName("");refresh(n=>n+1);};
   const load=(k)=>{const s=getSaved();if(s[k])onLoad(s[k].map(c=>defaultCoil(c)));};
-  const del=(k)=>{const s=getSaved();delete s[k];localStorage.setItem("coilConfigs",JSON.stringify(s));setOpen(o=>!o);setTimeout(()=>setOpen(o=>!o),0);};
-  const saved=getSaved();
-  const keys=Object.keys(saved);
+  const del=(k)=>{const s=getSaved();delete s[k];localStorage.setItem("coilConfigs",JSON.stringify(s));refresh(n=>n+1);};
+  const keys=Object.keys(getSaved());
   return(
     <div className="border-t border-gray-800 px-3 py-2 bg-gray-900/30">
       <div className="flex items-center justify-between cursor-pointer" onClick={()=>setOpen(!open)}>
@@ -536,6 +641,8 @@ export default function App(){
   const[showScales,setShowScales]=useState(true);
   const[showIndiv,setShowIndiv]=useState(false);
   const[showStats,setShowStats]=useState(true);
+  const[showField,setShowField]=useState(false);
+  const[fieldDensity,setFieldDensity]=useState(6);
 
   // Undo/redo
   const histRef=useRef([[]]);
@@ -568,12 +675,12 @@ export default function App(){
     return()=>window.removeEventListener("keydown",handler);
   },[]);
 
-  // Three.js refs
   const containerRef=useRef(null);
   const sceneRef=useRef(null);
   const cameraRef=useRef(null);
   const rendererRef=useRef(null);
   const coilGroupRef=useRef(null);
+  const fieldGroupRef=useRef(null);
   const scaleGroupRef=useRef(null);
   const frameRef=useRef(null);
   const orbitRef=useRef({theta:Math.PI/4,phi:Math.PI/3,dist:1.5,target:new THREE.Vector3(),dragging:false,panning:false,lastX:0,lastY:0});
@@ -597,6 +704,7 @@ export default function App(){
     scene.add(makeLabel("Z",new THREE.Vector3(0,0,.55),"#3b82f6"));
 
     const cg=new THREE.Group();scene.add(cg);coilGroupRef.current=cg;
+    const fg=new THREE.Group();fg.visible=false;scene.add(fg);fieldGroupRef.current=fg;
     const sg=buildScales(50);scene.add(sg);scaleGroupRef.current=sg;
 
     const o=orbitRef.current;
@@ -658,7 +766,7 @@ export default function App(){
   /* ── Scale visibility ────────────────────────────────── */
   useEffect(()=>{if(scaleGroupRef.current)scaleGroupRef.current.visible=showScales;},[showScales]);
 
-  /* ── Update meshes ───────────────────────────────────── */
+  /* ── Update coil meshes ──────────────────────────────── */
   useEffect(()=>{
     const cg=coilGroupRef.current;if(!cg)return;
     while(cg.children.length){const c=cg.children[0];if(c.geometry)c.geometry.dispose();if(c.material)c.material.dispose();cg.remove(c);}
@@ -668,7 +776,6 @@ export default function App(){
         buildCoilMeshes(coil,COLORS[i%COLORS.length],sel,showIndiv).forEach(m=>cg.add(m));
       }catch(e){console.warn(e);}
     });
-    // Ghosts
     const tk=new Map();
     coils.filter(c=>c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding").forEach(c=>{
       const k=`${c.type}_${c.majorRadius}_${c.minorRadius}_${c.extension||0}_${c.center}_${c.normal}`;
@@ -682,19 +789,27 @@ export default function App(){
     });
   },[coils,selectedId,multiSel,showIndiv]);
 
+  /* ── Field lines ─────────────────────────────────────── */
+  useEffect(()=>{
+    const fg=fieldGroupRef.current;if(!fg)return;
+    while(fg.children.length){const c=fg.children[0];if(c.geometry)c.geometry.dispose();if(c.material)c.material.dispose();fg.remove(c);}
+    if(showField&&coils.length>0){
+      const lines=generateFieldLines(coils,fieldDensity);
+      const meshGroup=buildFieldLineMeshes(lines);
+      meshGroup.children.forEach(c=>fg.add(c));
+    }
+    fg.visible=showField;
+  },[showField,coils,fieldDensity]);
+
   /* ── Fit view ────────────────────────────────────────── */
   const fitView=useCallback(()=>{
     if(coils.length===0)return;
     const box=new THREE.Box3();
-    coils.forEach(c=>{
-      const path=fullPath(c);
-      path.forEach(p=>box.expandByPoint(p));
-    });
+    coils.forEach(c=>{fullPath(c).forEach(p=>box.expandByPoint(p));});
     const center=new THREE.Vector3();box.getCenter(center);
     const size=box.getSize(new THREE.Vector3()).length();
     const o=orbitRef.current;
-    o.target.copy(center);
-    o.dist=Math.max(size*1.2,.1);
+    o.target.copy(center);o.dist=Math.max(size*1.2,.1);
     const cam=cameraRef.current;if(!cam)return;
     cam.position.set(o.target.x+o.dist*Math.sin(o.phi)*Math.cos(o.theta),o.target.y+o.dist*Math.cos(o.phi),o.target.z+o.dist*Math.sin(o.phi)*Math.sin(o.theta));
     cam.lookAt(o.target);
@@ -746,7 +861,6 @@ export default function App(){
 
   return(
     <div className="flex flex-col h-screen bg-gray-950 text-gray-200 overflow-hidden">
-      {/* Top bar */}
       <div className="flex items-center gap-2 px-4 py-2 bg-gray-900 border-b border-gray-800 shrink-0">
         <input value={prompt} onChange={e=>setPrompt(e.target.value)}
           onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&handleParse()}
@@ -760,7 +874,6 @@ export default function App(){
       {error&&<div className="px-4 py-1.5 bg-red-900/30 border-b border-red-800 text-red-300 text-xs">{error}</div>}
 
       <div className="flex flex-1 overflow-hidden">
-        {/* Left panel */}
         <div className="w-72 bg-gray-900/50 border-r border-gray-800 flex flex-col overflow-hidden shrink-0">
           <div className="flex items-center justify-between px-3 py-2 border-b border-gray-800">
             <span className="text-sm font-medium text-gray-300">Coils ({coils.length})</span>
@@ -788,20 +901,31 @@ export default function App(){
             </label>
             <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
               <input type="checkbox" checked={showIndiv} onChange={e=>setShowIndiv(e.target.checked)} className="rounded border-gray-600"/>
-              Individual turns (slow if many)
+              Individual turns
             </label>
+            <label className="flex items-center gap-2 text-xs text-gray-400 cursor-pointer">
+              <input type="checkbox" checked={showField} onChange={e=>setShowField(e.target.checked)} className="rounded border-gray-600"/>
+              Field lines
+            </label>
+            {showField&&(
+              <label className="flex flex-col gap-0.5 text-xs text-gray-500 ml-5">
+                <span>Density: {fieldDensity}</span>
+                <input type="range" min="3" max="16" step="1" value={fieldDensity}
+                  onChange={e=>setFieldDensity(parseInt(e.target.value))}
+                  className="w-full h-1 bg-gray-700 rounded-lg appearance-none cursor-pointer"/>
+              </label>
+            )}
           </div>
 
           <UniversalPanel onApply={applyUniversal}/>
           <SaveLoadPanel coils={coils} onLoad={(nc)=>{pushCoils(nc);setSelectedId(nc[0]?.id||null);}}/>
         </div>
 
-        {/* 3D viewer */}
         <div className="flex-1 relative">
           <div ref={containerRef} className="absolute inset-0"/>
           <InfoBox coils={coils} show={showStats} setShow={setShowStats}/>
           <div className="absolute bottom-3 left-3 text-xs text-gray-600 pointer-events-none select-none">
-            Drag: rotate · Shift+drag: pan · Scroll: zoom · Cmd+Z/Cmd+Shift+Z: undo/redo
+            Drag: rotate · Shift+drag: pan · Scroll: zoom · Cmd+Z: undo
           </div>
           <div className="absolute top-3 right-3 text-xs text-gray-600 pointer-events-none select-none bg-gray-900/60 rounded px-2 py-1">
             <span className="text-red-400">X</span> <span className="text-green-400">Y</span>(up) <span className="text-blue-400">Z</span> · cm

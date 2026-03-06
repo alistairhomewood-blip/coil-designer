@@ -292,21 +292,21 @@ function buildCoilMeshes(coil,color,sel,showIndiv){
 function buildCurrentArrows(coil,color){
   const group=new THREE.Group();
   const path=fullPath(coil,64);
-  const nArrows=8;
+  const nArrows=12;
   const step=Math.floor(path.length/nArrows);
-  const arrowLen=0.008;
+  const arrowLen=0.02;
+  const arrowR=0.008;
   for(let i=0;i<nArrows;i++){
     const idx=i*step;
     const p=path[idx];
     const pNext=path[(idx+1)%path.length];
     const dir=pNext.clone().sub(p).normalize();
     if(coil.current<0)dir.negate();
-    const cone=new THREE.ConeGeometry(0.004,arrowLen,6);
-    const mat=new THREE.MeshStandardMaterial({color:new THREE.Color(color),emissive:new THREE.Color(color),emissiveIntensity:0.6});
+    const cone=new THREE.ConeGeometry(arrowR,arrowLen,8);
+    const mat=new THREE.MeshStandardMaterial({color:new THREE.Color(color),emissive:new THREE.Color(color),emissiveIntensity:0.8});
     const mesh=new THREE.Mesh(cone,mat);
     mesh.position.copy(p).add(dir.clone().multiplyScalar(arrowLen/2));
-    const up=new THREE.Vector3(0,1,0);
-    const q=new THREE.Quaternion().setFromUnitVectors(up,dir);
+    const q=new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0),dir);
     mesh.quaternion.copy(q);
     group.add(mesh);
   }
@@ -402,10 +402,24 @@ function strengthToColor(t){
 
 function traceFieldLine(coils,start,steps,ds){
   const pts=[],mags=[];const p=start.clone();
+  const baseDs=Math.abs(ds);
+  const sign=ds>0?1:-1;
+  let prevDir=null;
   for(let i=0;i<steps;i++){
     const B=biotSavartB(coils,p);const mag=B.length();
     pts.push(p.clone());mags.push(mag);
-    if(mag<1e-15)break;B.normalize().multiplyScalar(ds);p.add(B);
+    if(mag<1e-15)break;
+    const dir=B.clone().normalize();
+    // Check for sharp reversals (>90 degrees) which indicate numerical issues near coils
+    if(prevDir&&dir.dot(prevDir)<0){
+      // We've hit a near-wire singularity, stop this line
+      break;
+    }
+    // Adaptive step: smaller steps where field is stronger (near coils)
+    const adaptDs=baseDs*Math.min(1,0.001/Math.max(mag,1e-10));
+    const stepSize=Math.max(baseDs*0.1,Math.min(baseDs*2,adaptDs));
+    p.add(dir.multiplyScalar(sign*stepSize));
+    prevDir=B.clone().normalize();
     if(p.length()>2)break;
   }
   return{pts,mags};
@@ -570,180 +584,169 @@ function CurrentEditor({coils,onUpdateCoils,highlightId,setHighlightId}){
 
   const maxI=useMemo(()=>Math.max(1,...coils.map(c=>Math.abs(c.current)))*1.3,[coils]);
 
-  // Draw bar chart
+  const dpr=typeof window!=='undefined'?window.devicePixelRatio||1:1;
+  const CW=500,CH=180,XW=500,XH=150;
+
   useEffect(()=>{
     const cv=canvasRef.current;if(!cv)return;
+    cv.width=CW*dpr;cv.height=CH*dpr;
+    cv.style.width=CW+"px";cv.style.height=CH+"px";
     const ctx=cv.getContext("2d");
-    const W=cv.width,H=cv.height;
-    ctx.clearRect(0,0,W,H);
-
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,CW,CH);
     if(coils.length===0)return;
-    const barW=Math.min(40,Math.max(8,(W-40)/coils.length-2));
-    const startX=30;
-    const zeroY=H-25;
-    const scaleH=zeroY-10;
 
-    // Axes
+    const barW=Math.min(30,Math.max(6,(CW-50)/coils.length-2));
+    const startX=40;
+    const zeroY=CH-20;
+    const scaleH=zeroY-15;
+
     ctx.strokeStyle="#444";ctx.lineWidth=1;
-    ctx.beginPath();ctx.moveTo(startX,5);ctx.lineTo(startX,zeroY);ctx.lineTo(W-5,zeroY);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(startX,10);ctx.lineTo(startX,zeroY);ctx.lineTo(CW-5,zeroY);ctx.stroke();
 
-    // Y-axis labels
     ctx.fillStyle="#666";ctx.font="10px monospace";ctx.textAlign="right";
-    for(let a=0;a<=maxI;a+=Math.max(1,Math.round(maxI/5))){
+    const yStep=Math.max(1,Math.ceil(maxI/6));
+    for(let a=0;a<=maxI;a+=yStep){
       const y=zeroY-(a/maxI)*scaleH;
-      ctx.fillText(a.toFixed(0)+"A",startX-3,y+3);
-      ctx.strokeStyle="#333";ctx.beginPath();ctx.moveTo(startX,y);ctx.lineTo(W-5,y);ctx.stroke();
+      ctx.fillText(a.toFixed(0)+"A",startX-4,y+3);
+      ctx.strokeStyle="#2a2a2a";ctx.beginPath();ctx.moveTo(startX,y);ctx.lineTo(CW-5,y);ctx.stroke();
     }
 
-    // Bars
     coils.forEach((c,i)=>{
-      const x=startX+5+i*(barW+2);
+      const x=startX+4+i*(barW+2);
       const barH=(Math.abs(c.current)/maxI)*scaleH;
       const y=zeroY-barH;
       const isHL=c.id===highlightId;
       const col=COLORS[i%COLORS.length];
 
-      ctx.fillStyle=isHL?col:col+"99";
+      ctx.fillStyle=isHL?col:col+"88";
       ctx.fillRect(x,y,barW,barH);
+      if(isHL){ctx.strokeStyle="#fff";ctx.lineWidth=1.5;ctx.strokeRect(x-0.5,y-0.5,barW+1,barH+1);ctx.lineWidth=1;}
 
-      if(isHL){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.strokeRect(x,y,barW,barH);ctx.lineWidth=1;}
+      ctx.fillStyle=isHL?"#eee":"#777";ctx.font="9px monospace";ctx.textAlign="center";
+      ctx.fillText(c.current.toFixed(1),x+barW/2,y-4);
 
-      // Label
-      ctx.fillStyle=isHL?"#fff":"#888";ctx.font="9px monospace";ctx.textAlign="center";
-      ctx.fillText(c.current.toFixed(1),x+barW/2,y-3);
-
-      // Coil index
-      ctx.fillStyle="#555";ctx.font="8px monospace";
+      ctx.fillStyle="#555";ctx.font="7px monospace";
       ctx.fillText(i+"",x+barW/2,zeroY+10);
     });
-  },[coils,highlightId,maxI]);
+  },[coils,highlightId,maxI,dpr]);
 
-  // Draw cross-section
   useEffect(()=>{
     const cv=crossRef.current;if(!cv)return;
+    cv.width=XW*dpr;cv.height=XH*dpr;
+    cv.style.width=XW+"px";cv.style.height=XH+"px";
     const ctx=cv.getContext("2d");
-    const W=cv.width,H=cv.height;
-    ctx.clearRect(0,0,W,H);
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    ctx.clearRect(0,0,XW,XH);
 
     const tor=coils.filter(c=>c.type==="toroidal_winding"||c.type==="elongated_toroidal_winding");
     if(tor.length===0){
       ctx.fillStyle="#444";ctx.font="11px sans-serif";ctx.textAlign="center";
-      ctx.fillText("Cross-section (toroidal only)",W/2,H/2);
-      return;
+      ctx.fillText("Cross-section (toroidal only)",XW/2,XH/2);return;
     }
 
     const c0=tor[0];
     const R=c0.majorRadius,r=c0.minorRadius,ext=c0.type==="elongated_toroidal_winding"?(c0.extension||0):0;
     const totalH=2*r+(ext>0?ext:0);
     const totalW=2*(R+r);
-    const scale=Math.min((W-30)/totalW,(H-30)/totalH)*0.85;
-    const cx=W/2,cy=H/2;
+    const scale=Math.min((XW-40)/totalW,(XH-30)/totalH)*0.8;
+    const cx=XW/2,cy=XH/2;
 
-    // Draw cross-section outline (two circles/stadiums)
     ctx.strokeStyle="#444";ctx.lineWidth=1;
+    const outerX=cx+R*scale;
+    const innerX=cx-R*scale;
 
-    // Right side cross-section (outer)
-    const outerX=cx+(R)*scale;
-    if(ext>0){
-      ctx.beginPath();
-      ctx.arc(outerX,cy-ext/2*scale,r*scale,Math.PI,0);
-      ctx.lineTo(outerX+r*scale,cy+ext/2*scale);
-      ctx.arc(outerX,cy+ext/2*scale,r*scale,0,Math.PI);
-      ctx.closePath();ctx.stroke();
-    }else{
-      ctx.beginPath();ctx.arc(outerX,cy,r*scale,0,2*Math.PI);ctx.stroke();
-    }
+    [outerX,innerX].forEach(px=>{
+      if(ext>0){
+        ctx.beginPath();
+        ctx.arc(px,cy-ext/2*scale,r*scale,Math.PI,0);
+        ctx.lineTo(px+r*scale,cy+ext/2*scale);
+        ctx.arc(px,cy+ext/2*scale,r*scale,0,Math.PI);
+        ctx.closePath();ctx.stroke();
+      }else{
+        ctx.beginPath();ctx.arc(px,cy,r*scale,0,2*Math.PI);ctx.stroke();
+      }
+    });
 
-    // Left side cross-section (inner)
-    const innerX=cx-(R)*scale;
-    if(ext>0){
-      ctx.beginPath();
-      ctx.arc(innerX,cy-ext/2*scale,r*scale,Math.PI,0);
-      ctx.lineTo(innerX+r*scale,cy+ext/2*scale);
-      ctx.arc(innerX,cy+ext/2*scale,r*scale,0,Math.PI);
-      ctx.closePath();ctx.stroke();
-    }else{
-      ctx.beginPath();ctx.arc(innerX,cy,r*scale,0,2*Math.PI);ctx.stroke();
-    }
-
-    // Central axis
     ctx.strokeStyle="#333";ctx.setLineDash([3,3]);
-    ctx.beginPath();ctx.moveTo(cx,10);ctx.lineTo(cx,H-10);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(cx,5);ctx.lineTo(cx,XH-5);ctx.stroke();
     ctx.setLineDash([]);
     ctx.fillStyle="#555";ctx.font="8px monospace";ctx.textAlign="center";
-    ctx.fillText("axis",cx,H-3);
+    ctx.fillText("axis",cx,XH-2);
 
-    // Draw coil positions
-    tor.forEach((c,i)=>{
+    tor.forEach(c=>{
       const{dr,dh}=stadiumPt(c.windingIndex/c.totalWindings,r,ext);
-      // Right side
       const px1=cx+(R+dr)*scale;
-      const py=cy-dh*scale;
-      // Left side (mirrored)
       const px2=cx-(R+dr)*scale;
-
+      const py=cy-dh*scale;
       const isHL=c.id===highlightId;
       const col=COLORS[coils.indexOf(c)%COLORS.length];
       const dotR=isHL?5:3;
-
       [px1,px2].forEach(px=>{
         ctx.beginPath();ctx.arc(px,py,dotR,0,2*Math.PI);
-        ctx.fillStyle=isHL?col:col+"88";ctx.fill();
-        if(isHL){ctx.strokeStyle="#fff";ctx.lineWidth=2;ctx.stroke();ctx.lineWidth=1;}
+        ctx.fillStyle=isHL?col:col+"66";ctx.fill();
+        if(isHL){ctx.strokeStyle="#fff";ctx.lineWidth=1.5;ctx.stroke();ctx.lineWidth=1;}
       });
     });
-  },[coils,highlightId]);
+  },[coils,highlightId,dpr]);
 
-  // Mouse interaction on bar chart
-  const handleBarMouse=(e,isDown)=>{
-    const cv=canvasRef.current;if(!cv)return;
+  const getBarIndex=(e)=>{
+    const cv=canvasRef.current;if(!cv||coils.length===0)return-1;
     const rect=cv.getBoundingClientRect();
-    const x=e.clientX-rect.left;
-    const y=e.clientY-rect.top;
-    const W=cv.width,H=cv.height;
-    if(coils.length===0)return;
+    const x=(e.clientX-rect.left)*(CW/rect.width);
+    const barW=Math.min(30,Math.max(6,(CW-50)/coils.length-2));
+    const startX=40;
+    return Math.floor((x-startX-4)/(barW+2));
+  };
 
-    const barW=Math.min(40,Math.max(8,(W-40)/coils.length-2));
-    const startX=30;
-    const zeroY=H-25;
-    const scaleH=zeroY-10;
+  const getBarCurrent=(e)=>{
+    const cv=canvasRef.current;if(!cv)return 0;
+    const rect=cv.getBoundingClientRect();
+    const y=(e.clientY-rect.top)*(CH/rect.height);
+    const zeroY=CH-20;
+    const scaleH=zeroY-15;
+    return Math.max(0,Math.round(((zeroY-y)/scaleH)*maxI*10)/10);
+  };
 
-    // Find which bar
-    const idx=Math.floor((x-startX-5)/(barW+2));
-    if(idx<0||idx>=coils.length)return;
-
-    if(isDown||dragging.current!==null){
-      if(isDown)dragging.current=idx;
-      const di=dragging.current;
-      if(di===null||di<0||di>=coils.length)return;
-      const newI=Math.max(0,((zeroY-y)/scaleH)*maxI);
-      const rounded=Math.round(newI*10)/10;
-      const updated=[...coils];
-      updated[di]={...updated[di],current:Math.min(rounded,maxI*2)};
-      onUpdateCoils(updated);
-      setHighlightId(updated[di].id);
-    }else{
+  const handleDown=e=>{
+    const idx=getBarIndex(e);
+    if(idx>=0&&idx<coils.length){
+      dragging.current=idx;
       setHighlightId(coils[idx].id);
+      const newI=getBarCurrent(e);
+      const updated=[...coils];updated[idx]={...updated[idx],current:Math.min(newI,maxI*2)};
+      onUpdateCoils(updated);
+    }
+  };
+
+  const handleMove=e=>{
+    if(dragging.current!==null&&dragging.current>=0&&dragging.current<coils.length){
+      const di=dragging.current;
+      const newI=getBarCurrent(e);
+      const updated=[...coils];updated[di]={...updated[di],current:Math.min(newI,maxI*2)};
+      onUpdateCoils(updated);
+    }else{
+      const idx=getBarIndex(e);
+      if(idx>=0&&idx<coils.length)setHighlightId(coils[idx].id);
     }
   };
 
   return(
     <div className="flex flex-col gap-2">
       <div className="text-xs text-gray-400 font-medium px-1">Current Editor — drag bars to adjust</div>
-      <canvas ref={canvasRef} width={500} height={180}
-        className="bg-gray-900/50 rounded border border-gray-800 cursor-crosshair w-full"
-        style={{imageRendering:"auto"}}
-        onMouseDown={e=>handleBarMouse(e,true)}
-        onMouseMove={e=>{if(dragging.current!==null)handleBarMouse(e,false);else{const rect=canvasRef.current.getBoundingClientRect();const x=e.clientX-rect.left;const barW=Math.min(40,Math.max(8,(500-40)/coils.length-2));const idx=Math.floor((x-35)/(barW+2));if(idx>=0&&idx<coils.length)setHighlightId(coils[idx].id);}}}
+      <canvas ref={canvasRef}
+        className="bg-gray-900/50 rounded border border-gray-800 cursor-crosshair"
+        style={{width:CW,height:CH}}
+        onMouseDown={handleDown}
+        onMouseMove={handleMove}
         onMouseUp={()=>{dragging.current=null;}}
         onMouseLeave={()=>{dragging.current=null;}}
       />
       <div className="text-xs text-gray-400 font-medium px-1">Cross-section — highlighted coil shown</div>
-      <canvas ref={crossRef} width={500} height={150}
-        className="bg-gray-900/50 rounded border border-gray-800 w-full"
-        style={{imageRendering:"auto"}}
+      <canvas ref={crossRef}
+        className="bg-gray-900/50 rounded border border-gray-800"
+        style={{width:XW,height:XH}}
       />
-      {/* Gradient tool */}
       <GradientTool coils={coils} onUpdateCoils={onUpdateCoils}/>
     </div>
   );
@@ -1000,7 +1003,7 @@ export default function App(){
     };
     const onMove=e=>{
       const o=orbitRef.current;const dx=e.clientX-o.lastX,dy=e.clientY-o.lastY;
-      if(o.dragging){o.theta-=dx*.005;o.phi=Math.max(.1,Math.min(Math.PI-.1,o.phi-dy*.005));}
+      if(o.dragging){o.theta+=dx*.005;o.phi=Math.max(.1,Math.min(Math.PI-.1,o.phi+dy*.005));}
       else if(o.panning){
         const cam=cameraRef.current;if(!cam)return;
         const fwd=new THREE.Vector3();cam.getWorldDirection(fwd);

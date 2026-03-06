@@ -16,13 +16,18 @@ function defaultCoil(overrides = {}) {
     center: [0,0,0], normal: [0,1,0],
     radius: 0.5, semiMajor: 0.5, semiMinor: 0.3,
     straightLength: 0.6, arcRadius: 0.3,
+    majorRadius: 0.1, minorRadius: 0.05,
+    windingIndex: 0, totalWindings: 12,
     turns: 100, current: 10, wireGauge: 14, windingLayers: 1,
     ...overrides, id,
   };
 }
 
+/* ── Path generation ──────────────────────────────────────── */
+
 function generatePath(coil) {
-  const pts = [], N = 128;
+  const pts = [], N = 256;
+
   if (coil.type === "circular") {
     for (let i = 0; i < N; i++) {
       const t = (i/N)*2*Math.PI;
@@ -39,7 +44,22 @@ function generatePath(coil) {
       const t = (i/N)*2*Math.PI;
       pts.push(new THREE.Vector3(coil.semiMajor*Math.cos(t), 0, coil.semiMinor*Math.sin(t)));
     }
+  } else if (coil.type === "toroidal_winding") {
+    // Each winding is a circle on the torus surface at a specific poloidal angle
+    // R = major radius (center of tube to center of torus)
+    // r = minor radius (radius of the tube)
+    // phi = poloidal angle determining where on the tube cross-section this winding sits
+    const R = coil.majorRadius;
+    const r = coil.minorRadius;
+    const phi = (coil.windingIndex / coil.totalWindings) * 2 * Math.PI;
+    const circleR = R + r * Math.cos(phi);
+    const circleY = r * Math.sin(phi);
+    for (let i = 0; i < N; i++) {
+      const t = (i / N) * 2 * Math.PI;
+      pts.push(new THREE.Vector3(circleR * Math.cos(t), circleY, circleR * Math.sin(t)));
+    }
   }
+
   const n = new THREE.Vector3(...coil.normal).normalize();
   if (n.length() < 0.001) n.set(0,1,0);
   const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), n);
@@ -50,8 +70,13 @@ function generatePath(coil) {
 function buildCoilMesh(coil, color, selected) {
   const path = generatePath(coil);
   const curve = new THREE.CatmullRomCurve3(path, true);
-  const tubeR = Math.max(0.008, (coil.radius || coil.arcRadius || 0.3)*0.03);
-  const geom = new THREE.TubeGeometry(curve, 200, tubeR, 12, true);
+  let tubeR;
+  if (coil.type === "toroidal_winding") {
+    tubeR = Math.max(0.003, coil.minorRadius * 0.06);
+  } else {
+    tubeR = Math.max(0.008, (coil.radius || coil.arcRadius || 0.3) * 0.03);
+  }
+  const geom = new THREE.TubeGeometry(curve, 256, tubeR, 12, true);
   const mat = new THREE.MeshStandardMaterial({
     color: new THREE.Color(color),
     emissive: new THREE.Color(selected ? color : "#000"),
@@ -59,6 +84,34 @@ function buildCoilMesh(coil, color, selected) {
     roughness: 0.4, metalness: 0.6,
   });
   return new THREE.Mesh(geom, mat);
+}
+
+/* ── Ghost torus for toroidal windings ────────────────────── */
+
+function buildGhostTorus(majorR, minorR, center, normal) {
+  const geom = new THREE.TorusGeometry(majorR, minorR, 32, 100);
+  const mat = new THREE.MeshStandardMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.07,
+    side: THREE.DoubleSide,
+    depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geom, mat);
+
+  // TorusGeometry lies in XY plane by default, we need it in XZ (Y up)
+  mesh.rotation.x = Math.PI / 2;
+
+  // Apply normal orientation
+  const n = new THREE.Vector3(...normal).normalize();
+  if (n.length() < 0.001) n.set(0,1,0);
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0,1,0), n);
+  // We need to compose: first the XZ flip, then the normal rotation
+  const flipQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(Math.PI/2, 0, 0));
+  mesh.quaternion.copy(q.multiply(flipQ));
+
+  mesh.position.set(...center);
+  return mesh;
 }
 
 function makeLabel(text, pos, color) {
@@ -74,16 +127,50 @@ function makeLabel(text, pos, color) {
   return sprite;
 }
 
+/* ── Claude API ───────────────────────────────────────────── */
+
 const SYSTEM_PROMPT = `You are a coil geometry interpreter. Parse the user's plain-English description of electromagnetic coil configurations into a JSON array.
 
 COORDINATE SYSTEM: right-handed, Y is up. Units: metres.
 
-Each coil object MUST contain ALL these fields:
-{"type":"circular"|"racetrack"|"elliptical","name":"label","center":[x,y,z],"normal":[nx,ny,nz],"radius":0.5,"semiMajor":0.5,"semiMinor":0.3,"straightLength":0.6,"arcRadius":0.3,"turns":100,"current":10.0,"wireGauge":14,"windingLayers":1}
+AVAILABLE COIL TYPES:
 
-Always include every field (use sensible defaults for unused ones).
+1. "circular" — a planar circular loop.
+2. "racetrack" — two straight segments joined by semicircular arcs.
+3. "elliptical" — a planar elliptical loop.
+4. "toroidal_winding" — a single wire loop that sits on the surface of a torus, tracing a circle in the toroidal direction at a fixed poloidal angle. Used when someone wants wires wound around a torus. For N toroidal windings equally spaced on a torus, output N separate coils of this type, each with a different windingIndex (0 to N-1). All share the same majorRadius, minorRadius, totalWindings, center, and normal.
+
+   The torus is defined by:
+   - majorRadius: distance from torus center to tube center = (innerRadius + outerRadius) / 2
+   - minorRadius: radius of the tube = (outerRadius - innerRadius) / 2
+
+   So if someone says inner radius 5cm and outer radius 15cm:
+   majorRadius = 0.10, minorRadius = 0.05
+
+Each coil object MUST contain ALL these fields:
+{
+  "type": "circular" | "racetrack" | "elliptical" | "toroidal_winding",
+  "name": "descriptive label",
+  "center": [x, y, z],
+  "normal": [nx, ny, nz],
+  "radius": 0.5,
+  "semiMajor": 0.5,
+  "semiMinor": 0.3,
+  "straightLength": 0.6,
+  "arcRadius": 0.3,
+  "majorRadius": 0.1,
+  "minorRadius": 0.05,
+  "windingIndex": 0,
+  "totalWindings": 12,
+  "turns": 100,
+  "current": 10.0,
+  "wireGauge": 14,
+  "windingLayers": 1
+}
+
+Always include every field. Use sensible defaults for fields not relevant to the chosen type.
 If unspecified: turns=100, current=10, wireGauge=14, windingLayers=1, normal=[0,1,0].
-For arrangements (rings, Halbach arrays, etc.) compute each individual coil position and normal vector.
+For arrangements, compute each individual coil's parameters.
 Respond with ONLY valid JSON array. No markdown, no backticks, no explanation.`;
 
 async function parseWithClaude(prompt) {
@@ -92,7 +179,7 @@ async function parseWithClaude(prompt) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: "claude-sonnet-4-20250514",
-      max_tokens: 4000,
+      max_tokens: 8000,
       system: SYSTEM_PROMPT,
       messages: [{ role: "user", content: prompt }],
     }),
@@ -102,10 +189,12 @@ async function parseWithClaude(prompt) {
   return JSON.parse(text.replace(/```json|```/g, "").trim());
 }
 
+/* ── UI components ────────────────────────────────────────── */
+
 function Num({ label, value, onChange, step = 0.01 }) {
   return (
     <label className="flex items-center gap-1 text-xs text-gray-300">
-      <span className="w-20 text-right text-gray-500 shrink-0">{label}</span>
+      <span className="w-24 text-right text-gray-500 shrink-0">{label}</span>
       <input type="number" step={step} value={value}
         onChange={e => onChange(parseFloat(e.target.value) || 0)}
         className="w-20 bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-gray-200 text-xs focus:border-blue-500 outline-none" />
@@ -146,25 +235,37 @@ function CoilCard({ coil, index, selected, onSelect, onUpdate, onDelete }) {
       {open && (
         <div className="px-3 pb-3 flex flex-col gap-2 text-xs" onClick={e => e.stopPropagation()}>
           <label className="flex items-center gap-1 text-gray-400">
-            <span className="w-20 text-right text-gray-500">Type</span>
+            <span className="w-24 text-right text-gray-500">Type</span>
             <select value={coil.type} onChange={e => set("type", e.target.value)}
               className="bg-gray-800 border border-gray-700 rounded px-1.5 py-0.5 text-gray-200 text-xs outline-none">
               <option value="circular">Circular</option>
               <option value="racetrack">Racetrack</option>
               <option value="elliptical">Elliptical</option>
+              <option value="toroidal_winding">Toroidal Winding</option>
             </select>
           </label>
           <Vec3 label="Center (m)" value={coil.center} onChange={v => set("center", v)} />
           <Vec3 label="Normal" value={coil.normal} onChange={v => set("normal", v)} />
+
           {coil.type === "circular" && <Num label="Radius (m)" value={coil.radius} onChange={v => set("radius", v)} />}
+
           {coil.type === "racetrack" && <>
             <Num label="Straight (m)" value={coil.straightLength} onChange={v => set("straightLength", v)} />
             <Num label="Arc R (m)" value={coil.arcRadius} onChange={v => set("arcRadius", v)} />
           </>}
+
           {coil.type === "elliptical" && <>
             <Num label="Semi-maj (m)" value={coil.semiMajor} onChange={v => set("semiMajor", v)} />
             <Num label="Semi-min (m)" value={coil.semiMinor} onChange={v => set("semiMinor", v)} />
           </>}
+
+          {coil.type === "toroidal_winding" && <>
+            <Num label="Major R (m)" value={coil.majorRadius} onChange={v => set("majorRadius", v)} />
+            <Num label="Minor R (m)" value={coil.minorRadius} onChange={v => set("minorRadius", v)} />
+            <Num label="Winding #" value={coil.windingIndex} onChange={v => set("windingIndex", v)} step={1} />
+            <Num label="Total winds" value={coil.totalWindings} onChange={v => set("totalWindings", v)} step={1} />
+          </>}
+
           <div className="border-t border-gray-800 pt-2 mt-1" />
           <Num label="Turns" value={coil.turns} onChange={v => set("turns", v)} step={1} />
           <Num label="Current (A)" value={coil.current} onChange={v => set("current", v)} step={0.1} />
@@ -176,6 +277,8 @@ function CoilCard({ coil, index, selected, onSelect, onUpdate, onDelete }) {
     </div>
   );
 }
+
+/* ── Main app ─────────────────────────────────────────────── */
 
 export default function App() {
   const [coils, setCoils] = useState([]);
@@ -192,6 +295,7 @@ export default function App() {
   const frameRef = useRef(null);
   const orbitRef = useRef({ theta: Math.PI/4, phi: Math.PI/3, dist: 4, dragging: false, lastX: 0, lastY: 0 });
 
+  /* ── Init Three.js ───────────────────────────────────── */
   useEffect(() => {
     const el = containerRef.current; if (!el) return;
     const scene = new THREE.Scene();
@@ -228,6 +332,7 @@ export default function App() {
     return () => { cancelAnimationFrame(frameRef.current); window.removeEventListener("resize", onResize); renderer.dispose(); if(el.contains(renderer.domElement)) el.removeChild(renderer.domElement); };
   }, []);
 
+  /* ── Orbit controls ──────────────────────────────────── */
   useEffect(() => {
     const el = containerRef.current; if (!el) return;
     function updateCam() {
@@ -244,12 +349,30 @@ export default function App() {
     return () => { el.removeEventListener("mousedown", onDown); window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); el.removeEventListener("wheel", onWheel); };
   }, []);
 
+  /* ── Update coil meshes ──────────────────────────────── */
   useEffect(() => {
     const cg = coilGroupRef.current; if (!cg) return;
     while (cg.children.length) { const c=cg.children[0]; c.geometry?.dispose(); c.material?.dispose(); cg.remove(c); }
-    coils.forEach((coil, i) => { try { cg.add(buildCoilMesh(coil, COLORS[i%COLORS.length], coil.id===selectedId)); } catch(e) { console.warn(e); } });
+
+    // Build coil meshes
+    coils.forEach((coil, i) => {
+      try { cg.add(buildCoilMesh(coil, COLORS[i%COLORS.length], coil.id===selectedId)); } catch(e) { console.warn(e); }
+    });
+
+    // Build ghost tori for toroidal windings (one per unique torus)
+    const torusKeys = new Map();
+    coils.filter(c => c.type === "toroidal_winding").forEach(c => {
+      const key = `${c.majorRadius}_${c.minorRadius}_${c.center.join(",")}_${c.normal.join(",")}`;
+      if (!torusKeys.has(key)) {
+        torusKeys.set(key, c);
+      }
+    });
+    torusKeys.forEach(c => {
+      try { cg.add(buildGhostTorus(c.majorRadius, c.minorRadius, c.center, c.normal)); } catch(e) { console.warn(e); }
+    });
   }, [coils, selectedId]);
 
+  /* ── Handlers ────────────────────────────────────────── */
   const addCoil = () => { const c=defaultCoil(); setCoils(p=>[...p,c]); setSelectedId(c.id); };
   const updateCoil = u => setCoils(p => p.map(c => c.id===u.id ? u : c));
   const deleteCoil = id => { setCoils(p => p.filter(c => c.id!==id)); if(selectedId===id) setSelectedId(null); };

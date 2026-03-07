@@ -1179,15 +1179,15 @@ function GradientTool({coils,onUpdateCoils}){
 /* ── Universal settings ───────────────────────────────────── */
 
 function UniversalPanel({onApply}){
-  const [vals,setVals] = useState({turns:100,current:10,wireGauge:14,channelWidth:0.01});
-  const [fields,setFields] = useState({turns:true,current:true,wireGauge:true,channelWidth:true});
+  const [vals,setVals] = useState({turns:100,wireGauge:14,channelWidth:0.01});
+  const [fields,setFields] = useState({turns:true,wireGauge:true,channelWidth:true});
   const s = (k,v) => setVals(p => ({...p,[k]:v}));
   const f = k => setFields(p => ({...p,[k]:!p[k]}));
   return (
     <div className="border-t border-gray-800 px-3 py-2 bg-gray-900/30">
       <span className="text-xs text-gray-400 font-medium">Apply to All / Selected</span>
       <div className="flex flex-col gap-1 mt-1.5">
-        {[["turns","Turns",1],["current","Current (A)",0.1],["wireGauge","AWG",1],["channelWidth","Channel (m)",0.001]].map(([k,l,st]) => (
+        {[["turns","Turns",1],["wireGauge","AWG",1],["channelWidth","Channel (m)",0.001]].map(([k,l,st]) => (
           <div key={k} className="flex items-center gap-1">
             <input type="checkbox" checked={fields[k]} onChange={()=>f(k)} className="rounded border-gray-600" />
             <Num label={l} value={vals[k]} onChange={v=>s(k,v)} step={st} />
@@ -1207,7 +1207,9 @@ function InfoBox({coils,show,setShow,avgBInside:avgBVal,computingAvgB,model,part
   );
   const stats = calcStats(coils);
   const bO = fieldAtPointVec(model, new THREE.Vector3(0,0,0));
-  const b30 = fieldAtPointVec(model, new THREE.Vector3(0.3,0,0));
+  const tp = getTorusParams(coils);
+  const outerR = tp ? (tp.R + tp.r + 0.05) : 0.3;
+  const b30 = fieldAtPointVec(model, new THREE.Vector3(outerR,0,0));
   return (
     <div className="absolute bottom-3 right-3 bg-gray-900/95 border border-gray-700 rounded-lg p-3 text-xs text-gray-300 z-10 min-w-56 max-w-80">
       <div className="flex justify-between items-center mb-2">
@@ -1220,7 +1222,7 @@ function InfoBox({coils,show,setShow,avgBInside:avgBVal,computingAvgB,model,part
         <div>Power: <span className="text-gray-100">{stats.totalPower<1 ? (stats.totalPower*1000).toFixed(2)+" mW" : stats.totalPower.toFixed(3)+" W"}</span></div>
         <div className="border-t border-gray-800 pt-1 mt-1" />
         <div>|B| origin: <span className="text-yellow-300">{fmtB(bO.length())}</span></div>
-        <div>|B| 30cm: <span className="text-yellow-300">{fmtB(b30.length())}</span></div>
+        <div>|B| outer+5cm: <span className="text-yellow-300">{fmtB(b30.length())}</span></div>
         {avgBVal !== null && <div>Avg |B| habitat: <span className="text-green-300">{fmtB(avgBVal.avg)}</span> <span className="text-gray-600">({avgBVal.n} pts)</span></div>}
         {computingAvgB && <div className="text-yellow-500">Computing habitat average...</div>}
         {particleStats && <div>Electrons entering habitat: <span className="text-red-300">{particleStats.entered}</span> / {particleStats.total}</div>}
@@ -1731,7 +1733,7 @@ export default function App(){
             </div>
           </div>
 
-          <div className="p-2 overflow-y-auto" style={{maxHeight:"34vh"}}>
+          <div className="p-2 overflow-y-auto" style={{maxHeight:"55vh"}}>
             {coils.length === 0 && <div className="text-center text-gray-600 text-xs mt-8 px-4 leading-relaxed">Describe coils above, or click + Add.</div>}
             {coils.map((c,i) => (
               <CoilCard
@@ -1848,7 +1850,7 @@ export default function App(){
           </div>
 
           {showCurrentEditor && coils.length > 0 && (
-            <div className="border-t border-gray-800 bg-gray-950 flex-shrink-0 overflow-auto p-3" style={{height:360}}>
+            <div className="border-t border-gray-800 bg-gray-950 flex-shrink-0 overflow-auto p-3" style={{minHeight:360,maxHeight:"45vh"}}>
               <CurrentEditor coils={coils} onUpdateCoils={pushCoils} highlightId={barHighlight} setHighlightId={setBarHighlight} />
             </div>
           )}

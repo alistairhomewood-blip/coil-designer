@@ -923,16 +923,24 @@ function CoilCard({coil,index,selected,multiSelected,onSelect,onShiftSelect,onUp
 function useElementSize(ref, defaultHeight){
   const [size,setSize] = useState({ width:640, height:defaultHeight });
   useEffect(()=>{
-    if(!ref.current || typeof ResizeObserver === "undefined") return;
+    const el = ref.current;
+    if(!el) return;
     const update = () => {
+      if(!ref.current) return;
       const rect = ref.current.getBoundingClientRect();
-      setSize({ width: Math.max(240, Math.floor(rect.width)), height: defaultHeight });
+      if(rect.width > 10) setSize({ width: Math.max(240, Math.floor(rect.width)), height: defaultHeight });
     };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(ref.current);
+    // Delay initial measurement to ensure layout is complete
+    const t1 = setTimeout(update, 50);
+    const t2 = setTimeout(update, 200);
+    if(typeof ResizeObserver !== "undefined"){
+      const ro = new ResizeObserver(update);
+      ro.observe(el);
+      window.addEventListener("resize", update);
+      return () => { clearTimeout(t1); clearTimeout(t2); ro.disconnect(); window.removeEventListener("resize", update); };
+    }
     window.addEventListener("resize", update);
-    return () => { ro.disconnect(); window.removeEventListener("resize", update); };
+    return () => { clearTimeout(t1); clearTimeout(t2); window.removeEventListener("resize", update); };
   }, [ref, defaultHeight]);
   return size;
 }
@@ -1733,7 +1741,7 @@ export default function App(){
             </div>
           </div>
 
-          <div className="p-2 overflow-y-auto" style={{maxHeight:"300vh"}}>
+          <div className="p-2 overflow-y-auto flex-1 min-h-0">
             {coils.length === 0 && <div className="text-center text-gray-600 text-xs mt-8 px-4 leading-relaxed">Describe coils above, or click + Add.</div>}
             {coils.map((c,i) => (
               <CoilCard
@@ -1818,7 +1826,7 @@ export default function App(){
           </div>
 
           <div className="border-t border-gray-800 px-3 py-2 bg-gray-900/30">
-            <div className="flex items-center justify-between cursor-pointer" onClick={()=>setShowCurrentEditor(!showCurrentEditor)}>
+            <div className="flex items-center justify-between cursor-pointer" onClick={()=>{setShowCurrentEditor(v=>!v);setBarHighlight(null);}}>
               <span className="text-xs text-gray-400 font-medium">Current Editor</span>
               <span className="text-gray-600 text-xs">{showCurrentEditor ? "▾" : "▸"}</span>
             </div>
@@ -1850,8 +1858,8 @@ export default function App(){
           </div>
 
           {showCurrentEditor && coils.length > 0 && (
-            <div className="border-t border-gray-800 bg-gray-950 flex-shrink-0 overflow-auto p-3" style={{minHeight:360,maxHeight:"45vh"}}>
-              <CurrentEditor coils={coils} onUpdateCoils={pushCoils} highlightId={barHighlight} setHighlightId={setBarHighlight} />
+            <div className="border-t border-gray-800 bg-gray-950 flex-shrink-0 overflow-auto p-3" style={{minHeight:380,maxHeight:"45vh"}}>
+              <CurrentEditor key={"ce-"+coils.length} coils={coils} onUpdateCoils={pushCoils} highlightId={barHighlight} setHighlightId={setBarHighlight} />
             </div>
           )}
         </div>

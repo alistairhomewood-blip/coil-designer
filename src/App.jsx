@@ -1733,7 +1733,7 @@ export default function App(){
             </div>
           </div>
 
-          <div className="p-2 overflow-y-auto" style={{maxHeight:"55vh"}}>
+          <div className="p-2 overflow-y-auto" style={{maxHeight:"300vh"}}>
             {coils.length === 0 && <div className="text-center text-gray-600 text-xs mt-8 px-4 leading-relaxed">Describe coils above, or click + Add.</div>}
             {coils.map((c,i) => (
               <CoilCard

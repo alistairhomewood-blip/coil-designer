@@ -1,0 +1,36 @@
+.section {
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  color: #aaa;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  text-align: left;
+}
+
+.header:hover { color: #fff; background: #2a2a2a; }
+
+.chevron {
+  display: inline-block;
+  transition: transform 0.15s;
+  color: #555;
+}
+
+.chevron.open {
+  transform: rotate(90deg);
+}
+
+.body {
+  padding: 4px 12px 12px;
+}

@@ -1,0 +1,13 @@
+.wrap {
+  flex: 1;
+  min-width: 400px;
+  min-height: 0;
+  background: #111;
+  position: relative;
+}
+
+.wrap canvas {
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
